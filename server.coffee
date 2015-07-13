@@ -4,7 +4,23 @@ Event = require 'event'
 
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
+	if not(Db.shared.isHash("balances"))
+		log "is old version"
+		importFromV1()
 	return
+
+exports.onInstall = ->
+	Db.shared.set "balances", "V2"
+
+exports.onConfig = (config) ->
+	if config.currency
+		result = config.currency
+		if result.length is 0
+			result = "€"
+		else if result.length > 1
+			result = result.substr(0, 1)
+		Db.shared.set "currency", result
+
 
 # Add or change a transaction
 ## id = transaction number
@@ -25,6 +41,7 @@ exports.client_transaction = (id, data) !->
 	data.total = +data.total
 	
 	Db.shared.set 'transactions', id, data	
+	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
 	balanceAmong data.total, data.by
 	balanceAmong -data.total, data.for
 	# Send notifications
@@ -193,10 +210,39 @@ exports.client_account = (text) !->
 formatMoney = (amount) ->
 	front = Math.floor(amount)
 	back = Math.round(amount*100)%100
+	currency = "€"
+	if Db.shared.get("currency")
+		currency = Db.shared.get("currency")
 	if front < 0 and back isnt 0
-		"€"+(front+1)+"."+('0'+(back))[-2..]
+		currency+(front+1)+"."+('0'+(back))[-2..]
 	else
-		"€"+front+"."+('0'+(back))[-2..]
+		currency+front+"."+('0'+(back))[-2..]
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
+
+
+importFromV1 = !->
+	Db.shared.set 'x_v1backup', Db.shared.peek()
+	Db.shared.iterate (key) !->
+		if key.key() isnt 'x_v1backup'
+			Db.shared.remove key.key()
+	log "Converting database of old version to new"
+	Db.shared.iterate "x_v1backup", "transactions", (transaction) !->
+		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+		log "old transaction: "+transaction.key()
+		Db.shared.set "transactions", id, "creatorId", transaction.peek("creatorId")
+		Db.shared.set "transactions", id, "text", transaction.peek("description")
+		Db.shared.set "transactions", id, "created", transaction.peek("time")
+		total = (transaction.peek("cents")/100)
+		Db.shared.set "transactions", id, "total", total
+		forData = {}
+		transaction.iterate "borrowers", (user) !->
+			forData[user.key()] = true
+		Db.shared.set "transactions", id, "for", forData
+		byData = {}
+		byData[transaction.peek("lenderId")] = true
+		Db.shared.set "transactions", id, "by", byData
+		balanceAmong total, byData
+		balanceAmong -total, forData
+

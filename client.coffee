@@ -13,7 +13,12 @@ Social = require 'social'
 Time = require 'time'
 Event = require 'event'
 
+
 exports.render = ->
+	log "Plugin.api() = "+Plugin.api()
+	if Plugin.api() <= 1
+		Dom.text "Reload the happening"
+		return
 	req0 = Page.state.get(0)
 	if req0 is 'new'
 		renderEditOrNew()
@@ -33,11 +38,12 @@ exports.render = ->
 	# Balances
 	Ui.list !->
 		Dom.h2 tr("Balances")
-		Db.shared.iterate 'balances', (user) !->
+		Plugin.users.iterate (user) !->
 			Ui.item !->
-				if user.get() > 0
+				balance = (Db.shared.get("balances", user.key()) ||0)
+				if balance > 0
 				 	Dom.style color: "#080"
-				else if user.get() < 0
+				else if balance < 0
 				 	Dom.style color: "#E41B1B"
 				Ui.avatar Plugin.userAvatar(user.key()), 
 					onTap: (!-> Plugin.userInfo(user.key()))
@@ -46,8 +52,9 @@ exports.render = ->
 					Dom.style Flex: true
 					Dom.div formatName(user.key(), true)
 				Dom.div !->
-					 Dom.text formatMoney(user.get())
+					 Dom.text formatMoney(balance)
 		, (user) -> 
+			# Sort users with zero balance to the bottom
 			number = parseInt(user.get())
 			if number is 0
 				return 9007199254740991
@@ -79,8 +86,8 @@ exports.render = ->
 						Dom.text tr("Want to settle balances? Ask a group admin to initiate settle mode!")
 	# Latest transactions
 	Ui.list !->
+		Dom.h2 tr("Latest transactions")
 		if Db.shared.count("transactions").get() isnt 0
-			Dom.h2 tr("Latest transactions")
 			Db.shared.iterate 'transactions', (tx) !->
 				Ui.item !->
 					Dom.div !->
@@ -107,7 +114,6 @@ exports.render = ->
 						Page.nav [tx.key()]
 			, (tx) -> -tx.key()
 		else
-			Dom.h2 tr("No previous transactions")
 			Ui.emptyText tr("Create a new transaction with the button below.")
 						
 	Page.setFooter
@@ -132,6 +138,18 @@ renderView = (txId) !->
 	Dom.section !->
 		Dom.h2 tr("Description")
 		Dom.text transaction.get("text")
+		Dom.div !->
+			Dom.style fontSize: '80%'
+			created = Db.shared.get("transactions", txId, "created")
+			updated = Db.shared.get("transactions", txId, "updated")
+			if created?
+				Dom.br()
+				Dom.text "Created "
+				Time.deltaText created
+				if updated?
+					Dom.text tr(", edited ")
+					Time.deltaText updated
+				Dom.text "."
 	Ui.list !->
 		Dom.h2 tr("Paid by")
 		renderBalanceSplitSection(transaction.get("total"), transaction.ref("by"))
@@ -182,12 +200,7 @@ renderBalanceSplitSection = (total, path) !->
 				 	Dom.text " ("+suffix+")"
 	, (amount) ->
 		# Sort static on top, then percentage, then remainder
-		if amount.get() is true
-			return 1
-		else if (amount.get()+"").substr(-1) is "%"
-			return 0
-		else
-			return -1
+		return getSortValue(amount.get())
 			
 # Render a transaction edit page
 renderEditOrNew = (editId) !->
@@ -249,23 +262,44 @@ renderEditOrNew = (editId) !->
 					onChange: (value) ->
 						log 'totalO write', +value
 						totalO.set +value
-		# No amount entered	
-		Form.condition (values) ->
-			if +values.total <= 0
-				return tr("Enter an amount")
-			if (not (values.text?)) or values.text.length < 1
-				return tr("Enter a description")
+		Dom.div !->
+			Dom.style fontSize: '80%'
+			created = Db.shared.get("transactions", editId, "created")
+			updated = Db.shared.get("transactions", editId, "updated")
+			if created?
+				Dom.text "Created "
+				Time.deltaText created
+				if updated?
+					Dom.text tr(", last edited ")
+					Time.deltaText updated
+				Dom.text "."
+			# No amount entered	
+			Form.condition (values) ->
+				if +values.total <= 0
+					return tr("Enter an amount")
+				if (not (values.text?)) or values.text.length < 1
+					return tr("Enter a description")
 	
+	multiplePaidBy = Obs.create(false)
 	Ui.list !->
 		Dom.h2 tr("Paid by")
 		log 'full list refresh'
-		byRefresh = Obs.create(0)
+		remainder = Obs.create(totalO.peek())
+		Obs.observe !->
+			remainder.set(totalO.get())
 		# Setup temporary data
-		dbg.by = byO = Obs.create {}
+		byO = Obs.create {}
 		if edit
 			byO.set edit.get('by')
-		else
+		userCount = 0
+		byO.iterate (user) !->
+			userCount++
+			Obs.onClean !-> userCount--
+		if userCount > 1
+			multiplePaidBy.set(true)
+		if userCount == 0
 			byO.set Plugin.userId(), true
+		usersLeft = Obs.create(byO.count().peek())
 		# Set form input
 		[handleChange] = Form.makeInput
 			name: 'by'
@@ -274,75 +308,120 @@ renderEditOrNew = (editId) !->
 			handleChange byO.get()
 		Obs.observe !->
 			log "users reresh"
-			byRefresh.get()
-			remainder = totalO.get()
-			usersLeft = byO.count().get()
-			log "usersLeft="+usersLeft
-			byO.iterate (user) !->
-				amount = user.get()
+			log "usersLeft="+usersLeft.peek()
+			Plugin.users.iterate (user) !->
+				amount = byO.get(user.key())
 				number = 0
 				suffix = undefined
-				log "remainder="+remainder+", amount="+amount + " of user "+user.key()
-				log amount
-				if amount is true
-					log "remainder"
-					number = Math.round((remainder*100.0)/usersLeft)/100.0
-				else if (amount+"").substr(-1) is "%"
-					log "percent"
-					amount = amount+""
-					percent = +(amount.substr(0, amount.length-1))
-					number = Math.round(percent*totalO.get())/100.0
-					remainder -= number
-					suffix = percent+"%"
-					usersLeft--
-				else
-					log "static"
-					number = +amount
-					remainder -= number
-					suffix = "fixed"
-					usersLeft--
+				log "remainder="+remainder.peek()+", amount="+amount + " of user "+user.key()
+				if amount
+					if amount is true
+						log "remainder"
+						number = Math.round((remainder.get()*100.0)/usersLeft.get())/100.0
+					else if (amount+"").substr(-1) is "%"
+						log "percent"
+						amount = amount+""
+						percent = +(amount.substr(0, amount.length-1))
+						number = Math.round(percent*totalO.get())/100.0
+						remainder.modify((v) -> v-number)
+						suffix = percent+"%"
+						usersLeft.modify (v) -> v-1
+						Obs.onClean !->
+							usersLeft.incr()
+							remainder.modify((v) -> v+number)
+					else
+						log "static"
+						number = +amount
+						suffix = "fixed"
+						remainder.modify (v) -> v-number
+						usersLeft.modify (v) -> v-1
+						Obs.onClean !->
+							usersLeft.incr()
+							remainder.modify((v) -> v+number)
 				# TODO: Assign possibly remaining part of the total to someone
-				Ui.item !->
-					Dom.onTap !->
-						selectUser (userId) !->
-							byO.set {}
-							byO.set userId, true
-							log "user set: ", byO
-							byRefresh.incr()
-					Ui.avatar Plugin.userAvatar(user.key()), 
-						onTap: (!-> Plugin.userInfo(user.key()))
-						style: marginRight: "10px"
-					Dom.div !->
-						Dom.style Flex: true
-						Dom.div formatName(user.key(), true)
+				if multiplePaidBy.get() or amount
+					Ui.item !->
+						Dom.onTap
+							cb: !->
+								if multiplePaidBy.get()
+									if amount?
+										byO.set(user.key(), null)
+										usersLeft.modify (v) -> v-1
+									else
+										byO.set(user.key(), true)
+										usersLeft.incr()
+									log "user toggled"
+								else
+									selectUser (userId) !->
+										byO.set {}
+										byO.set userId, true
+										log "user set: ", byO
+
+								log "Clicked=", byO, ", usersLeft="+usersLeft.peek(), ", amount="+amount			
+							longTap: !->
+								Modal.prompt tr("Amount paid for %1?", formatName(user.key())), (v) !->
+									number = +v
+									if (v+"").substr(-1) is "%"
+										log "modal percent received"
+										percent = +((v+"").substr(0, v.length-1))
+										if percent < 0 or percent >100
+											Modal.show "Use a percentage between 0 and 100 instead of "+v+"."
+											return
+										else
+											byO.set user.key(), v
+											if not (amount?)
+												usersLeft.incr()
+									else if not isNaN(number)
+										log "number=", number, ", numberIsNaN=", number is NaN
+										byO.set user.key(), number
+										if not (amount?)
+											usersLeft.incr()
+									else
+										Modal.show "Incorrect input: \""+v+"\", use a number for a fixed amount or a percentage."
+									log "Amount updated=", byO
+						if multiplePaidBy.get()
+							Dom.style
+								fontWeight: if amount then 'bold' else ''
+						Ui.avatar Plugin.userAvatar(user.key()), 
+							onTap: (!-> Plugin.userInfo(user.key()))
+							style: marginRight: "10px"
 						Dom.div !->
-							Dom.style fontSize: '80%'
-							Dom.text tr("Tap to change")
-					Dom.div !->
-						 Dom.text formatMoney(number)
-						 if suffix isnt undefined
-						 	Dom.text " ("+suffix+")"
-			, (user) ->
-				# Sort static on top, then percentage, then remainder
-				amount = byO.get(user.key())
-				if amount is true
-					return 1
-				else if (amount+"").substr(-1) is "%"
-					return 0
-				else
-					return -1
-	###
-	Dom.div !->
-		Dom.text tr("Add an extra person")
-		Dom.onTap !->
-	###
+							Dom.style Flex: true
+							Dom.div formatName(user.key(), true)
+							if not multiplePaidBy.get()
+								Dom.div !->
+									Dom.style fontSize: '80%'
+									Dom.text tr("Tap to change")
+						Dom.div !->
+							 Dom.text formatMoney(number)
+							 if suffix isnt undefined
+							 	Dom.text " ("+suffix+")"
+	
+		Obs.observe !->
+			if not multiplePaidBy.get() and Plugin.users.count().get() > 1
+				Dom.div !->
+					Dom.style
+						textAlign: 'center'
+						color: Plugin.colors().highlight
+						fontSize: "80%"
+						padding: "5px"
+						margin: "0 0 -8px 0"
+					Dom.text "Add multiple users"
+					Dom.onTap !->
+						multiplePaidBy.set(true)
 
 	Ui.list !->
 		Dom.h2 tr("Paid for")
-		log 'full list refresh'	
-		forRefresh = Obs.create(0)
-		
+		log 'full list refresh'
+		remainder = Obs.create(totalO.peek())
+		Obs.observe !->
+			remainder.set(totalO.get())
 		forO = Obs.create {}
+		if Db.shared.peek("transactions", editId)
+			Db.shared.iterate "transactions", editId, "for", (user) !->
+				forO.set user.key(), user.get()
+		usersLeft = Obs.create(forO.count().peek())
+
 		if edit
 			forO.set edit.get('for')
 		[handleChange] = Form.makeInput
@@ -350,42 +429,71 @@ renderEditOrNew = (editId) !->
 			value: forO.peek()
 		Obs.observe !->
 			handleChange forO.get()
+		Obs.observe !->
+			users = Plugin.users.count().get()
+			selected = forO.count().get()
+			log "users="+users+", selected="+selected
+			Dom.div !->
+				Dom.text "Select all" if selected < users
+				Dom.text "Deselect all" if selected is users
+				Dom.onTap !->
+					if selected < users
+						log "Select all"
+						Plugin.users.iterate (user) !->
+							if not (forO[user.key()])
+								forO[user.key()] = true
+								usersLeft.modify (v) -> v-1
+					else
+						log "Deselect all"
+						forO = Obs.create {}
+						usersLeft.set 0
 
 		Obs.observe !->
 			log "users refresh"
-			forRefresh.get()
-			remainder = totalO.get()
-			usersLeft = forO.count().get()
-			log "usersLeft="+usersLeft
+			log "usersLeft="+usersLeft.peek()
 			Plugin.users.iterate (user) !->
 				amount = forO.get(user.key())
 				number = 0
 				suffix = undefined
-				log "remainder="+remainder+", amount="+amount + " of user "+user.key()
+				totalO.get()
+				log "remainder="+remainder.peek()+", amount="+amount + " of user "+user.key()
 				log amount
 				if amount
 					if amount is true
-						number = Math.round((remainder*100.0)/usersLeft)/100.0
+						log "true case"
+						number = Math.round((remainder.get()*100.0)/usersLeft.get())/100.0
 					else if (amount+"").substr(-1) is "%"
+						log "percent case"
 						amount = amount+""
 						percent = +(amount.substr(0, amount.length-1))
 						number = Math.round(percent*totalO.get())/100.0
-						remainder -= number
+						remainder.modify((v) -> v-number)
 						suffix = percent+"%"
-						usersLeft--
+						usersLeft.modify (v) -> v-1
+						Obs.onClean !->
+							usersLeft.incr()
+							remainder.modify((v) -> v+number)
 					else
+						log "number case"
 						number = +amount
-						remainder -= number
+						remainder.modify((v) -> v-number)
 						suffix = "fixed"
-						usersLeft--
+						usersLeft.modify (v) -> v-1
+						Obs.onClean !->
+							usersLeft.incr()
+							remainder.modify((v) -> v+number)
 						
 				# TODO: Assign possibly remaining part of the total to someone (only for show, server handles balances correctly)
 				Ui.item !->
 					Dom.onTap
 						cb: !->
-							forO.set user.key(), if amount? then null else true
-							log "Clicked=", forO
-							forRefresh.incr()						
+							if amount?
+								forO.set(user.key(), null)
+								usersLeft.modify (v) -> v-1
+							else
+								forO.set(user.key(), true)
+								usersLeft.incr()
+							log "Clicked=", forO, ", usersLeft="+usersLeft.peek(), ", amount="+amount			
 						longTap: !->
 							Modal.prompt tr("Amount paid for %1?", formatName(user.key())), (v) !->
 								number = +v
@@ -397,13 +505,16 @@ renderEditOrNew = (editId) !->
 										return
 									else
 										forO.set user.key(), v
+										if not (amount?)
+											usersLeft.incr()
 								else if not isNaN(number)
 									log "number=", number, ", numberIsNaN=", number is NaN
 									forO.set user.key(), number
+									if not (amount?)
+										usersLeft.incr()
 								else
 									Modal.show "Incorrect input: \""+v+"\", use a number for a fixed amount or a percentage."
 								log "Amount updated=", forO
-								forRefresh.incr()
 					Dom.style
 						fontWeight: if amount then 'bold' else ''
 					Ui.avatar Plugin.userAvatar(user.key()), 
@@ -417,17 +528,6 @@ renderEditOrNew = (editId) !->
 							 Dom.text formatMoney(number)
 							 if suffix isnt undefined
 							 	Dom.text " ("+suffix+")"
-			, (user) ->
-				# Sort static on top, then percentage, then remainder
-				amount = forO.get(user.key())
-				if not amount
-					return 10
-				else if amount is true
-					return 1
-				else if (amount+"").substr(-1) is "%"
-					return 0
-				else
-					return -1
 	Dom.div !->
 		Dom.style
 			textAlign: 'center'
@@ -453,6 +553,17 @@ renderEditOrNew = (editId) !->
 	Form.setPageSubmit (values) !->
 		Page.up()
 		Server.call 'transaction', editId, values
+
+# Sort static on top, then percentage, then remainder, then undefined
+getSortValue = (key) ->
+	if (key+"").substr(-1) is "%"
+		return 0
+	else if (key+"") is "true"
+		return 1
+	else if (key is undefined or not (key?))
+		return 10
+	else
+		return -1
 	
 renderSettlePane = (settleO) !->		
 	Ui.list !->
@@ -539,21 +650,18 @@ renderSettlePane = (settleO) !->
 					Ui.button tr("Cancel"), !->
 						require('modal').confirm tr("Cancel settle?"), tr("There are uncompleted settling transactions! When someone has paid without acknowledge of the recipient, balances might be inaccurate..."), !->
 							Server.call 'settleStop'
-		
 
-exports.renderSettings = !->
-	if Db.shared
-		log "Settings after added"
-	else
-		log "Settings when adding"
 
 formatMoney = (amount) ->
 	front = Math.floor(amount)
 	back = Math.round(amount*100)%100
+	currency = "€"
+	if Db.shared.get("currency")
+		currency = Db.shared.get("currency")
 	if front < 0 and back isnt 0
-		"€"+(front+1)+"."+('0'+(back))[-2..]
+		currency+(front+1)+"."+('0'+(back))[-2..]
 	else
-		"€"+front+"."+('0'+(back))[-2..]
+		currency+front+"."+('0'+(back))[-2..]
 	
 formatName = (userId, capitalize) ->
 	if +userId != Plugin.userId()
@@ -590,6 +698,37 @@ selectUser = (cb) !->
 	        , (user) ->
 	            +user.key()
 	, false, ['cancel', tr("Cancel")]
+
+
+exports.renderSettings = !->
+	Dom.text "Select the currency symbol you want to use:"
+	Dom.br()
+	currencyInput = null
+	Dom.div !->
+		Dom.style display: 'inline-block', marginRight: "15px", width: "25px"
+		text = '€'
+		if Db.shared
+			if Db.shared.get("currency")
+				text = Db.shared.get("currency")
+		currencyInput = Form.input
+			name: 'currency'
+			text: text
+	log "currencyInput: ", currencyInput
+	renderCurrency = (value) !->
+		Ui.button !->
+			Dom.text value
+			Dom.style
+				width: "20px"
+				fontSize: "125%"
+				textAlign: "center"
+				padding: "4px 6px"
+		, !->
+			currencyInput.value(value)
+	renderCurrency("€")
+	renderCurrency("$")
+	renderCurrency("£")
+
+
 
 
 capitalizeFirst = (string) ->
