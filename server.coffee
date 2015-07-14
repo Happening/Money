@@ -1,6 +1,7 @@
 Db = require 'db'
 Plugin = require 'plugin'
 Event = require 'event'
+Timer = require 'timer'
 
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
@@ -9,10 +10,11 @@ exports.onUpgrade = ->
 		importFromV1()
 	return
 
-exports.onInstall = ->
+exports.onInstall = (config = {}) ->
 	Db.shared.set "balances", "V2"
+	onConfig(config)
 
-exports.onConfig = (config) ->
+exports.onConfig = onConfig = (config) ->
 	if config.currency
 		result = config.currency
 		if result.length is 0
@@ -84,7 +86,6 @@ balanceAmong = (total, users) !->
 			Db.shared.modify 'balances', userId, (v) -> (v||0) + number
 			remainder -= number
 		else if amount isnt true
-			log "static"
 			number = +amount
 			remainder -= number
 		else
@@ -156,24 +157,50 @@ exports.client_settleStart = !->
 		unit: "settle"
 		text: "A settle has started, check your payments"
 		include: members
+	# Set reminders
+	Db.shared.iterate "settle", (settle) !->
+		Timer.set 1000*30, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
+
+# Triggered when a settle reminder happens
+## args.users = key to settle transaction
+exports.reminder = (args) ->
+	[from,to] = args.users.split(':')
+	Event.create
+		unit: "settleRemind"
+		text: "There is an open settle to "+Plugin.userName(to)+"."
+		include: from
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
 	Plugin.assertAdmin()
 	allDone = false
+	members = []
 	Db.shared.iterate "settle", (settle) !->
-		done = settle.get("done")
-		if done is 2 or done is 3
-			members = []
-			Db.shared.iterate "settle", (settle) !->
-				[from,to] = settle.key().split(':')
-				members.push from
-				members.push to
-			Event.create
-				unit: "settleFinish"
-				text: "A settle has been finished, everything is paid"
-				include: members
-
+		Timer.cancel 'reminder', {users: settle.key()}
+		done = settle.peek("done")
+		if not(done is 2 or done is 3)
+			allDone = false
+			[from,to] = settle.key().split(':')
+			members.push from
+			members.push to
+			id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+			transaction = {}
+			forData = {}
+			forData[to] = true
+			byData = {}
+			byData[from] = true
+			transaction["creatorId"] = -1
+			transaction["for"] = forData
+			transaction["by"] = byData
+			transaction["type"] = "settle"
+			transaction["total"] = settle.peek("amount")
+			transaction["created"] = (new Date()/1000)
+			Db.shared.set 'transactions', id, transaction
+	if allDone
+		Event.create
+			unit: "settleFinish"
+			text: "A settle has been finished, everything is paid"
+			include: members
 	Db.shared.remove 'settle'
 
 # Sender marks settle as paid
@@ -208,15 +235,11 @@ exports.client_account = (text) !->
 	Db.shared.set 'accounts', Plugin.userId(), text
 
 formatMoney = (amount) ->
-	front = Math.floor(amount)
-	back = Math.round(amount*100)%100
+	number = amount.toFixed(2)
 	currency = "€"
 	if Db.shared.get("currency")
 		currency = Db.shared.get("currency")
-	if front < 0 and back isnt 0
-		currency+(front+1)+"."+('0'+(back))[-2..]
-	else
-		currency+front+"."+('0'+(back))[-2..]
+	return currency+number
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
