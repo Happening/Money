@@ -78,31 +78,56 @@ exports.client_removeTransaction = (id) !->
 balanceAmong = (total, users) !->
 	divide = []
 	remainder = total
+	totalShare = 0
 	for userId,amount of users
 		if (amount+"").endsWith("%")
 			amount = amount+""
 			percent = +(amount.substring(0, amount.length-1))
-			number = Math.round(percent*total)/100.0
-			Db.shared.modify 'balances', userId, (v) -> (v||0) + number
-			remainder -= number
-		else if amount isnt true
-			number = +amount
-			remainder -= number
+			totalShare += percent
+			divide.push userId
+		else if (""+amount) is "true"
+			divide.push userId
+			totalShare += 100
 		else
-			divide.push userId			
-	if remainder and divide.length > 0
-		amount = Math.round((remainder*100.0)/divide.length)/100.0
+			number = +amount
+			amount = Math.round(amount*100.0)/100.0
+			if total < 0
+				remainder += amount
+			else
+				remainder -= amount
+			if (total < 0)
+				number = -number
+			Db.shared.modify 'balances', userId, (v) -> 
+				result = (v||0) + number
+				return parseFloat(result)
+	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
+	if remainder isnt 0 and divide.length > 0
+		lateRemainder = remainder
 		while userId = divide.pop()
-			Db.shared.modify 'balances', userId, (v) -> (v||0) + amount
-			remainder -= amount
-		if remainder  # There is something left (probably because of rounding)
+			raw = users[userId]
+			percent = 100
+			if (raw+"").endsWith("%")
+				raw = raw+""
+				percent = +(raw.substring(0, raw.length-1))
+			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
+			Db.shared.modify 'balances', userId, (v) -> 
+				#log "v="+v
+				result = (v||0) + amount
+				#log "result="+result+", parsed="+parseFloat(result)+", amount="+amount+", v="+v
+				return parseFloat(result)
+			lateRemainder -= amount
+			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
+		#log "lateRemainder="+lateRemainder
+		if lateRemainder isnt 0  # There is something left (probably because of rounding)
 			# random user gets (un)lucky
 			count = 0
 			for userId of users
 				if Math.random() < 1/++count
 					luckyId = userId
-			Db.shared.modify 'balances', luckyId, (v) -> (v||0) + remainder
-			log luckyId+" is (un)lucky: "+remainder
+			Db.shared.modify 'balances', luckyId, (v) -> 
+				result = (v||0) + lateRemainder
+				return parseFloat(result)
+			log luckyId+" is (un)lucky: "+lateRemainder
 
 # Start a settle for all balances
 exports.client_settleStart = !->
@@ -111,9 +136,12 @@ exports.client_settleStart = !->
 	negBalances = []
 	posBalances = []
 	Db.shared.iterate "balances", (user) !->
+		log "user="+user.key()+", balance="+user.peek()
 		if user.peek() > 0
+			log "positive"
 			posBalances.push([user.key(), user.peek()])
 		else if user.peek() < 0
+			log "negative"
 			negBalances.push([user.key(), user.peek()])
 	# Check for equal balance differences
 	i = negBalances.length
@@ -124,12 +152,15 @@ exports.client_settleStart = !->
 			neg = negBalances[i][1]
 			pos = posBalances[j][1]
 			if -neg == pos
+				log "found the same"
 				identifier = negBalances[i][0] + ":" + posBalances[j][0]
 				settles[identifier] = {done: 0, amount: pos}
 				negBalances.splice(i, 1)
 				posBalances.splice(j, 1)
 	# Create settles for the remaining balances
+	log "posBalances="+posBalances.length + ", negBalances="+negBalances.length
 	while negBalances.length > 0 and posBalances.length > 0
+		log "found transaction"
 		identifier = negBalances[0][0] + ":" + posBalances[0][0]
 		amount = Math.min(Math.abs(negBalances[0][1]), posBalances[0][1])
 		settles[identifier] = {done: 0, amount: amount}
@@ -159,7 +190,7 @@ exports.client_settleStart = !->
 		include: members
 	# Set reminders
 	Db.shared.iterate "settle", (settle) !->
-		Timer.set 1000*30, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
+		Timer.set 1000*60*60*24*7, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
 
 # Triggered when a settle reminder happens
 ## args.users = key to settle transaction
@@ -169,6 +200,7 @@ exports.reminder = (args) ->
 		unit: "settleRemind"
 		text: "There is an open settle to "+Plugin.userName(to)+"."
 		include: from
+	Timer.set 1000*60*60*24*7, 'reminder', args
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
@@ -178,7 +210,7 @@ exports.client_settleStop = !->
 	Db.shared.iterate "settle", (settle) !->
 		Timer.cancel 'reminder', {users: settle.key()}
 		done = settle.peek("done")
-		if not(done is 2 or done is 3)
+		if (done is 2 or done is 3)
 			allDone = false
 			[from,to] = settle.key().split(':')
 			members.push from
