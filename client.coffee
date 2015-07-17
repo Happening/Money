@@ -111,7 +111,7 @@ exports.render = ->
 						# Your share
 						Dom.div !->
 							Box: 'vertical'
-							Dom.style textAlign: 'right'
+							Dom.style textAlign: 'right', paddingLeft: '10px'
 							Dom.div !->
 								share = calculateShare(tx, Plugin.userId())
 								stylePositiveNegative(share)
@@ -269,10 +269,13 @@ renderBalanceSplitSection = (total, path) !->
 					Dom.style Flex: true
 					Dom.div formatName(user.key(), true)
 				Dom.div !->
-					 Dom.text formatMoney(number)
+					 Dom.style textAlign: 'right'
+					 Dom.div !->
+					 	Dom.text formatMoney(number)
 					 if suffix isnt undefined
-					 	Dom.br()
-					 	Dom.text "("+suffix+")"
+					 	Dom.div !->
+					 		Dom.style fontSize: '80%'
+					 		Dom.text "("+suffix+")"
 		, (amount) ->
 			# Sort static on top, then percentage, then remainder
 			return getSortValue(amount.get())
@@ -408,12 +411,12 @@ renderEditOrNew = (editId) !->
 									if (value+"").indexOf(",") isnt -1
 										value = (value+"").replace(",", ".")
 									log "value="+value
-									bySave = byO.peek()
 									oldValue = byO.peek(userKey)
-									totalSave = totalO.peek()
 									byO.set(userKey, +value)
+									bySave = byO.peek()
 									log 'user='+userKey+', write', +value, " byO="+JSON.stringify(byO.peek()) + ", float="+parseFloat(value)
 									totalO.modify((v) -> v-oldValue+(+value))
+									totalSave = totalO.peek()
 								return
 			else
 				# Setup temporary data
