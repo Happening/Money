@@ -224,7 +224,22 @@ renderView = (txId) !->
 			Dom.h2 tr("Paid for")
 			renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"))
 	# Comments
-	Social.renderComments(txId)
+	renderSystemComment = (comment) ->
+		log "Custom render called: "+JSON.stringify(comment.peek())
+		if comment.get('system')? and comment.get('system')
+			Dom.div !->
+				Dom.style
+					margin: '15px 0px 15px 50px'
+					fontSize: '85%'
+				Event.styleNew(comment.get('t'))
+				Dom.text Plugin.userName(comment.get('u'))+" edited the transaction • "
+				Time.deltaText comment.get('t')
+			return true
+		return false
+	Social.renderComments
+		path: [txId]
+		content: renderSystemComment
+		
 
 renderBalanceSplitSection = (total, path) !->
 	remainder = Obs.create(total)
@@ -295,9 +310,8 @@ renderEditOrNew = (editId) !->
 	# Current form total
 	totalO = Obs.create 0	
 	byO = undefined
+	forO = undefined
 	multiplePaidBy = Obs.create(false)
-	totalSave = undefined
-	bySave = undefined
 	# Description and amount input
 	Dom.div !->
 		# Check if there is an ongoing settle
@@ -358,26 +372,25 @@ renderEditOrNew = (editId) !->
 		byO = Obs.create {}
 		if edit
 			byO.set edit.get('by')
-		userCount = 0
-		byO.iterate (user) !->
-			userCount++
-			Obs.onClean !-> userCount--
-		if userCount > 1
-			multiplePaidBy.set(true)
-		if userCount == 0
+		else
 			byO.set Plugin.userId(), 0
-			log "reset"
-
+		multiplePaidBy.set(byO.count().peek() > 1)
+		# Set the total
 		Obs.observe !->
-			total = 0
 			byO.iterate (user) !->
-				total += parseFloat(user.get())
-			totalO.set total
+				oldValue = parseFloat(user.get())
+				totalO.modify((v) -> v + oldValue)
+				#log "total set to: "+totalO.peek()
+				Obs.onClean !->
+					totalO.modify((v) -> v - oldValue)
+		# Save data in pagestate
 		[handleChange] = Form.makeInput
 			name: 'by'
 			value: byO.peek()
 		Obs.observe !->
 			handleChange byO.get()
+			log "byO form updated"
+		# Render page
 		Obs.observe !->
 			if not multiplePaidBy.get()
 				Ui.item !->
@@ -407,27 +420,12 @@ renderEditOrNew = (editId) !->
 							value: edit.peek('total') if edit
 							onChange: (value) ->
 								if value
-									log 'user write', +value, " byO="+JSON.stringify(byO.peek())
 									if (value+"").indexOf(",") isnt -1
 										value = (value+"").replace(",", ".")
-									log "value="+value
-									oldValue = byO.peek(userKey)
 									byO.set(userKey, +value)
-									bySave = byO.peek()
 									log 'user='+userKey+', write', +value, " byO="+JSON.stringify(byO.peek()) + ", float="+parseFloat(value)
-									totalO.modify((v) -> v-oldValue+(+value))
-									totalSave = totalO.peek()
 								return
 			else
-				# Setup temporary data
-				if totalSave isnt undefined
-					temp = totalSave
-					totalSave = undefined
-					totalO.set temp
-				if bySave isnt undefined
-					temp = bySave
-					bySave = undefined
-					byO.set temp
 				# Set form input
 				Obs.observe !->
 					log "users reresh"
@@ -472,17 +470,14 @@ renderEditOrNew = (editId) !->
 														value = (value+"").replace(",", ".")
 													number = +value
 													if (not (isNaN(number)))
-														log "number=", number, ", numberIsNaN=", number is NaN
-														byO.set user.key(), number
-														log "if"
+														#log "number=", number, ", numberIsNaN=", number is NaN
+														if number is 0
+															byO.remove user.key()
+														else
+															byO.set user.key(), number
 													else
-														log "else"
 														Modal.show "Incorrect input: \""+value+"\", use a number"
-													total = 0
-													byO.iterate (user) !->
-														total += user.peek()
-													totalO.set total
-													log "Amount updated=", JSON.stringify(byO)
+													#log "Amount updated=", JSON.stringify(byO)
 												# Do something
 											Modal.show tr("Amount paid by %1?", formatName(user.key())), !->
 												Dom.div !->
@@ -497,11 +492,14 @@ renderEditOrNew = (editId) !->
 															fontSize: '21px'
 													Dom.div !->
 														Dom.style Flex: true
+														defaultValue = undefined
+														if (byO.peek(user.key())+"") isnt "true" and ((byO.peek(user.key())+"").substr(-1) isnt "%")
+															defaultValue = +byO.peek(user.key())
 														inputField = Form.input
 															name: 'paidby'
 															type: 'number'
 															text: '0.-'
-															#value: edit.peek('total') if edit # Place old value in the box?
+															value: defaultValue
 															onChange: (v) ->
 																if v
 																	value = v
@@ -557,22 +555,16 @@ renderEditOrNew = (editId) !->
 			Dom.style marginTop: '20px'
 		Dom.h2 tr("Paid for")
 		log 'full list refresh'
-		remainder = Obs.create(totalO.peek())
+		# Setup remainder
+		remainder = Obs.create(0)
 		Obs.observe !->
-			remainder.set(totalO.get())
+			oldTotal = totalO.peek()
+			remainder.modify((v)->v+totalO.get())
+			Obs.onClean !->
+				remainder.modify((v)->v-oldTotal)
+			#log "remainder update: "+remainder.peek()
+		# Setup for
 		forO = Obs.create {}
-		if Db.shared.peek("transactions", editId)
-			Db.shared.iterate "transactions", editId, "for", (user) !->
-				forO.set user.key(), user.get()
-		share = 0
-		forO.iterate (user) !->
-			if (user.peek()+"") is "true"
-				share += 100
-			else if (user.peek()+"").substr(-1) is "%"
-				amount = user.peek()+""
-				share += (+(amount.substr(0, amount.length-1)))
-		log "share="+share
-		totalShare = Obs.create(share)
 		if edit
 			forO.set edit.get('for')
 		[handleChange] = Form.makeInput
@@ -580,10 +572,13 @@ renderEditOrNew = (editId) !->
 			value: forO.peek()
 		Obs.observe !->
 			handleChange forO.get()
+			log "forO form updated"
+		# Setup totalshare
+		totalShare = Obs.create(0)
+		# Select/deselect all button
 		Obs.observe !->
 			users = Plugin.users.count().get()
 			selected = forO.count().get()
-			totalShare.get()
 			Dom.div !->
 				Dom.text "Select all" if selected < users
 				Dom.text "Deselect all" if selected is users
@@ -599,34 +594,43 @@ renderEditOrNew = (editId) !->
 						Plugin.users.iterate (user) !->
 							if forO.peek(user.key()) is undefined
 								forO.set(user.key(), true)
-								totalShare.modify((v) -> v+100)
 					else
 						log "Deselect all"
-						forO = Obs.create {}
-						totalShare.set 0
-						remainder.set totalO.peek()
+						forO.set {}
+		# Render page
 		Obs.observe !->
 			log "users refresh"
 			Dom.div !->
 				Dom.style margin: '5px -5px 0 -5px', _userSelect: 'none'
 				Plugin.users.iterate (user) !->
 					amount = forO.get(user.key())
-					number = 0
+					number = Obs.create 0
 					suffix = undefined
 					totalO.get()
-					if amount
-						#log "totalShare="+totalShare.peek()+", totalO="+totalO.peek()+", remainder="+remainder.peek()
-						if (amount+"") is "true"
-							number = Math.round((remainder.get()*100.0)/totalShare.get()*100)/100.0
-						else if (amount+"").substr(-1) is "%"
-							amount = amount+""
-							percent = +(amount.substr(0, amount.length-1))
-							number = Math.round((remainder.get()*100.0)/totalShare.get()*percent)/100.0
-							suffix = percent+"%"
-						else
-							number = +amount
-							remainder.modify((v) -> v-number)
-							suffix = "fixed"							
+					Obs.observe !->
+						if amount
+							if (amount+"") is "true"
+								totalShare.modify((v) -> v+100)
+								Obs.onClean !->
+									totalShare.modify((v) -> v-100)
+								Obs.observe !->
+									number.set(Math.round((remainder.get()*100.0)/totalShare.get()*100)/100.0)
+							else if (amount+"").substr(-1) is "%"
+								amount = amount+""
+								percent = +(amount.substr(0, amount.length-1))
+								totalShare.modify((v) -> v+percent)
+								Obs.onClean !->
+									totalShare.modify((v) -> v-percent)
+								Obs.observe !->
+									number.set(Math.round((remainder.get()*100.0)/totalShare.get()*percent)/100.0)
+								suffix = percent+"%"
+							else
+								number.set(+amount)
+								Obs.observe !->
+									remainder.modify((v) -> v-number.get())
+									Obs.onClean !->
+										remainder.modify((v) -> v+number.get())
+								suffix = "fixed"							
 					# TODO: Assign possibly remaining part of the total to someone (only for show, server handles balances correctly)
 					Dom.div !-> # Aligning div
 						Dom.style
@@ -649,69 +653,41 @@ renderEditOrNew = (editId) !->
 							Dom.onTap
 								cb: !->
 									if amount?
-										modifier = 0
-										remainderMod = 0
-										oldValue = forO.peek(user.key())
-										if (oldValue+"").substr(-1) is "%"
-											oldPercent = +((oldValue+"").substr(0, oldValue.length-1))
-											modifier -= oldPercent
-										else if (oldValue+"") is "true"
-											modifier -= 100
-										else if oldValue isnt undefined
-											remainderMod = oldValue
-										totalShare.modify((v) -> v+modifier)
-										remainder.modify((v) -> v+remainderMod)
 										forO.set(user.key(), null)
 									else
-										forO.set(user.key(), true)
-										totalShare.modify((v) -> v+100)		
+										forO.set(user.key(), true)	
 								longTap: !->
 									value = undefined
 									update = Obs.create(false)
 									Obs.observe !->
 										update.get()
 										if value?
-											log "received update"
+											#log "received update"
 											v = value
 											if (v+"").indexOf(",") isnt -1
 												v = (v+"").replace(",", ".")
-											number = +v
+											amount = +v
 											if (v+"").substr(-1) is "%"
-												log "modal percent received"
+												#log "modal percent received"
 												percent = +((v+"").substr(0, v.length-1))
 												if percent < 0
 													Modal.show "Use a percentage above 0 instead of "+v+"."
 													return
 												else
-													oldValue = forO.peek(user.key())
-													modifier = percent
-													remainderMod = 0
-													if (oldValue+"").substr(-1) is "%"
-														oldPercent = +((oldValue+"").substr(0, oldValue.length-1))
-														modifier -= oldPercent
-													else if (oldValue+"") is "true"
-														modifier -= 100
-													else if oldValue isnt undefined
-														remainderMod = +oldValue
-													totalShare.modify((v) -> v+modifier)
-													remainder.modify((v) -> v+remainderMod)
-													if percent is 100
+													if percent is 0
+														forO.remove user.key()
+													else if percent is 100
 														forO.set user.key(), true
 													else
 														forO.set user.key(), v
-											else if not isNaN(number)
-												log "number=", number, ", numberIsNaN=", number is NaN
-												modifier = 0
-												oldValue = forO.peek(user.key())
-												if (oldValue+"").substr(-1) is "%"
-													oldPercent = +((oldValue+"").substr(0, oldValue.length-1))
-													modifier -= oldPercent
-												else if (oldValue+"") is "true"
-													modifier -= 100
-												totalShare.modify((v) -> v+modifier)
-												forO.set user.key(), number
+											else if not isNaN(amount)
+												#log "amount=", amount, ", amountIsNaN=", amount is NaN
+												if amount is 0
+													forO.remove user.key()
+												else
+													forO.set user.key(), amount
 											else
-												log "incorrect for"
+												#log "incorrect for"
 												Modal.show "Incorrect input: \""+v+"\", use a number for a fixed amount or a percentage"
 											log "Amount updated=", forO
 									Modal.show tr("Amount paid for %1?", formatName(user.key())), !->
@@ -722,10 +698,15 @@ renderEditOrNew = (editId) !->
 													Dom.style Box: 'horizontal'
 													Dom.div !->
 														Dom.style Flex: true
+														defaultValue = undefined
+														if (forO.peek(user.key())+"").substr(-1) is "%"
+															defaultValue = (forO.peek(user.key())+"").substr(0, (forO.peek(user.key())+"").length-1)
+														else if (forO.peek(user.key())+"") is "true"
+															defaultValue = 100
 														inputField = Form.input
-															name: 'paidFor1'
+															name: 'paidForPercent'+user.key()
 															text: '100'
-															#value: edit.peek('total') if edit # Place old value in the box?
+															value: defaultValue
 															onChange: (v) ->
 																if v
 																	value = v+"%"
@@ -749,11 +730,14 @@ renderEditOrNew = (editId) !->
 															fontSize: '21px'
 													Dom.div !->
 														Dom.style Flex: true
+														defaultValue = undefined
+														if (not (isNaN(+forO.peek(user.key()))))
+															defaultValue = +forO.peek(user.key())
 														inputField = Form.input
-															name: 'paidFor2'
+															name: 'paidForFixed'+user.key()
 															type: 'number'
 															text: '0.-'
-															#value: edit.peek('total') if edit # Place old value in the box?
+															value:  defaultValue
 															onChange: (v) ->
 																if v
 																	value = v
@@ -814,7 +798,7 @@ renderEditOrNew = (editId) !->
 										Dom.style Box: 'horizontal'
 										Dom.div !->
 											Dom.style Flex: true
-											Dom.text formatMoney(number)
+											Dom.text formatMoney(number.get())
 											Dom.style
 												fontWeight: 'normal'
 												fontSize: '90%'
@@ -833,13 +817,12 @@ renderEditOrNew = (editId) !->
 												color: '#080'
 										 
 		Form.condition (values) ->
-			remainderLocal = Obs.create totalO.peek()
-			if remainderLocal.peek() is 0
+			if totalO.peek() is 0
 				text = "A transaction with a total of zero is not useful"
 				if Db.shared.peek("transactions", editId)?
 					text += " (remove it instead)"
 				return tr(text)
-			if remainderLocal.peek() < 0
+			if totalO.peek() < 0
 				return tr("A negative paid by is not possible (switch paid by and paid for)")
 			good = false
 			forO.iterate (user) !->
@@ -849,13 +832,8 @@ renderEditOrNew = (editId) !->
 					return
 				else if (amount+"").substr(-1) is "%"
 					good = true
-				else
-					number = +amount
-					remainderLocal.modify((v) -> v-number)
-					Obs.onClean !->
-						remainderLocal.modify((v) -> v+number)
-			if remainderLocal.peek() < 0 or (remainderLocal.peek() != 0 and not good)
-				return tr("The totals do not match.")
+			if remainder.peek() isnt 0 and not good
+				return tr("The by and for section do not match")
 	Dom.div !->
 		Dom.style
 			textAlign: 'center'
@@ -881,13 +859,12 @@ renderEditOrNew = (editId) !->
 
 	Form.setPageSubmit (values) !->
 		Page.up()
-		total = 0
-		byO.iterate (user) !->
-			total += user.peek()
-		values['total'] = total
-		values['by'] = byO.peek()
-		log "sending: "+JSON.stringify(values)
-		Server.call 'transaction', editId, values
+		result = {}
+		result['total'] = totalO.peek()
+		result['by'] = byO.peek()
+		result['for'] = forO.peek()
+		result['text'] = values.text
+		Server.call 'transaction', editId, result
 
 # Sort static on top, then percentage, then remainder, then undefined
 getSortValue = (key) ->
@@ -1062,37 +1039,52 @@ exports.renderSettings = !->
 
 calculateShare = (transaction, id) ->
 	calculatePart = (section, total, id) ->
-		result = 0	
-		remainder = Obs.create(total)
-		usersLeft = Obs.create(section.count().get())
-		Obs.observe !->
-			section.iterate (user) !->
-				amount = section.get(user.key())
-				number = 0
-				if amount
-					if amount is true
-						number = Math.round((remainder.get()*100.0)/usersLeft.get())/100.0
-					else if (amount+"").substr(-1) is "%"
-						amount = amount+""
-						percent = +(amount.substr(0, amount.length-1))
-						number = Math.round(percent*total)/100.0
-						remainder.modify((v) -> v-number)
-						usersLeft.modify (v) -> v-1
-						Obs.onClean !->
-							usersLeft.incr()
-							remainder.modify((v) -> v+number)
-					else
-						number = +amount
-						remainder.modify (v) -> v-number
-						usersLeft.modify (v) -> v-1
-						Obs.onClean !->
-							usersLeft.incr()
-							remainder.modify((v) -> v+number)
-				if (user.key()+"") is (id+"")
-					#log "found user in share"
-					result = number
-		return result
-
+		divide = []
+		remainder = total
+		totalShare = 0
+		for userId,amount of section.peek()
+			if (amount+"").substr(-1) is "%"
+				amount = amount+""
+				percent = +(amount.substring(0, amount.length-1))
+				totalShare += percent
+				divide.push userId
+			else if (""+amount) is "true"
+				divide.push userId
+				totalShare += 100
+			else
+				number = +amount
+				amount = Math.round(amount*100.0)/100.0
+				remainder -= amount
+				if (userId+"") is (id+"")
+					return amount
+		#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
+		if remainder isnt 0 and divide.length > 0
+			#lateRemainder = remainder
+			while userId = divide.pop()
+				raw = section.peek(userId)
+				percent = 100
+				if (raw+"").substr(-1) is "%"
+					raw = raw+""
+					percent = +(raw.substring(0, raw.length-1))
+				amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
+				if (userId+"") is (id+"")
+					return parseFloat(amount)
+		return 0
+		#lateRemainder -= amount
+		#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
+		#log "lateRemainder="+lateRemainder
+		###
+		if lateRemainder isnt 0  # There is something left (probably because of rounding)
+			# random user gets (un)lucky
+			count = 0
+			for userId of users
+				if Math.random() < 1/++count
+					luckyId = userId
+			Db.shared.modify 'balances', luckyId, (v) -> 
+				result = (v||0) + lateRemainder
+				return parseFloat(result)
+			log luckyId+" is (un)lucky: "+lateRemainder
+		###
 	byAmount = calculatePart(transaction.ref('by'), transaction.get('total'), id)
 	forAmount = calculatePart(transaction.ref('for'), transaction.get('total'), id)
 	result = byAmount - forAmount

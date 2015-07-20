@@ -2,6 +2,7 @@ Db = require 'db'
 Plugin = require 'plugin'
 Event = require 'event'
 Timer = require 'timer'
+Social = require 'social'
 
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
@@ -28,6 +29,19 @@ exports.onConfig = onConfig = (config) ->
 ## id = transaction number
 ## data = {user: <amount>, ...}
 exports.client_transaction = (id, data) !->
+	# Verify and clean data
+	newBy = {}
+	total = 0
+	for userId, share of data.by
+		log "userId="+userId+", share="+share
+		if (not isNaN(+share)) and +share isnt 0
+			newBy[userId] = share
+			total += (+share)
+	data.by = newBy
+	if total isnt data.total
+		log "[transaction()] WARNING: total does not match the by section, total="+data.total+" byTotal="+total
+		return
+
 	isNew = false
 	if !id
 		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
@@ -36,16 +50,16 @@ exports.client_transaction = (id, data) !->
 	else
 		# Undo previous data on balance
 		prevData = Db.shared.get 'transactions', id
-		balanceAmong -prevData.total, prevData.by
-		balanceAmong prevData.total, prevData.for
+		balanceAmong -prevData.total, prevData.by, id
+		balanceAmong prevData.total, prevData.for, id
 		data["created"] = Db.shared.peek("transactions", id, "created")
 		data["updated"] = (new Date())/1000
 	data.total = +data.total
 	
 	Db.shared.set 'transactions', id, data	
 	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
-	balanceAmong data.total, data.by
-	balanceAmong -data.total, data.for
+	balanceAmong data.total, data.by, id
+	balanceAmong -data.total, data.for, id
 	# Send notifications
 	members = []
 	Db.shared.iterate "transactions", id, "for", (user) !->
@@ -63,24 +77,39 @@ exports.client_transaction = (id, data) !->
 			unit: "transaction"
 			text: "Transaction updated: "+Db.shared.peek("transactions", id, "text")
 			include: members
+		# Add system comment
+		Social.customComment id,
+			c: "Edited the transaction"
+			t: Math.round(new Date()/1000)
+			u: Plugin.userId()
+			system: true
+
+	Timer.cancel 'settleRemind', {}
+	allZero = true
+	Db.shared.iterate "balances", (user) !->
+		if user.peek() isnt 0
+			allZero = false
+	if not allZero
+		Timer.set 1000*60*60*24*7, 'settleRemind', {}  # Week: 1000*60*60*24*7
+
 
 # Delete a transaction
 exports.client_removeTransaction = (id) !->
 	# TODO: Only by admin? Only by creator?
 	transaction = Db.shared.ref("transactions", id)
 	# Undo transaction balance changes
-	balanceAmong -transaction.peek("total"), transaction.peek("by")
-	balanceAmong transaction.peek("total"), transaction.peek("for")
+	balanceAmong -transaction.peek("total"), transaction.peek("by"), id
+	balanceAmong transaction.peek("total"), transaction.peek("for"), id
 	# Remove transaction
 	Db.shared.remove("transactions", id)
 
 # Process a transaction and update balances
-balanceAmong = (total, users) !->
+balanceAmong = (total, users, txId = 99) !->
 	divide = []
 	remainder = total
 	totalShare = 0
 	for userId,amount of users
-		if (amount+"").endsWith("%")
+		if (amount+"").substr(-1) is "%"
 			amount = amount+""
 			percent = +(amount.substring(0, amount.length-1))
 			totalShare += percent
@@ -106,7 +135,7 @@ balanceAmong = (total, users) !->
 		while userId = divide.pop()
 			raw = users[userId]
 			percent = 100
-			if (raw+"").endsWith("%")
+			if (raw+"").substr(-1) is "%"
 				raw = raw+""
 				percent = +(raw.substring(0, raw.length-1))
 			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
@@ -122,7 +151,7 @@ balanceAmong = (total, users) !->
 			# random user gets (un)lucky
 			count = 0
 			for userId of users
-				if Math.random() < 1/++count
+				if randomFromSeed(txId) < 1/++count
 					luckyId = userId
 			Db.shared.modify 'balances', luckyId, (v) -> 
 				result = (v||0) + lateRemainder
@@ -189,6 +218,7 @@ exports.client_settleStart = !->
 		text: "A settle has started, check your payments"
 		include: members
 	# Set reminders
+	Timer.cancel 'settleRemind', {}
 	Db.shared.iterate "settle", (settle) !->
 		Timer.set 1000*60*60*24*7, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
 
@@ -197,10 +227,23 @@ exports.client_settleStart = !->
 exports.reminder = (args) ->
 	[from,to] = args.users.split(':')
 	Event.create
-		unit: "settleRemind"
+		unit: "settlePayRemind"
 		text: "There is an open settle to "+Plugin.userName(to)+"."
 		include: from
 	Timer.set 1000*60*60*24*7, 'reminder', args
+
+
+# Reminder of non-zero balances
+exports.settleRemind = (args) ->
+	users = []
+	for userId in Plugin.userIds()
+		if Db.shared.peek("balances", userId) isnt 0
+			users.push userId
+	Event.create
+		unit: "settleRemind"
+		text: "There are balances to settle, open the plugin to start a settle."
+		include: users
+	Timer.set 1000*60*60*24*7, 'settleRemind', args
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
@@ -298,6 +341,9 @@ importFromV1 = !->
 		byData = {}
 		byData[transaction.peek("lenderId")] = true
 		Db.shared.set "transactions", id, "by", byData
-		balanceAmong total, byData
-		balanceAmong -total, forData
+		balanceAmong total, byData, id
+		balanceAmong -total, forData, id
 
+randomFromSeed = (seed) ->
+	x = Math.sin(seed) * 10000
+	return x-Math.floor(x)
