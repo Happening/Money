@@ -105,6 +105,7 @@ exports.client_removeTransaction = (id) !->
 
 # Process a transaction and update balances
 balanceAmong = (total, users, txId = 99) !->
+	log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
 	divide = []
 	remainder = total
 	totalShare = 0
@@ -126,9 +127,10 @@ balanceAmong = (total, users, txId = 99) !->
 				remainder -= amount
 			if (total < 0)
 				number = -number
-			Db.shared.modify 'balances', userId, (v) -> 
-				result = (v||0) + number
-				return parseFloat(result)
+			old = Db.shared.peek('balances', userId)
+			newValue = Db.shared.modify 'balances', userId, (v) -> 
+				return (v||0) + number
+			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
 	if remainder isnt 0 and divide.length > 0
 		lateRemainder = remainder
@@ -139,12 +141,13 @@ balanceAmong = (total, users, txId = 99) !->
 				raw = raw+""
 				percent = +(raw.substring(0, raw.length-1))
 			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
-			Db.shared.modify 'balances', userId, (v) -> 
+			old = Db.shared.peek('balances', userId)
+			newValue = Db.shared.modify 'balances', userId, (v) -> 
 				#log "v="+v
-				result = (v||0) + amount
+				return (v||0) + amount
 				#log "result="+result+", parsed="+parseFloat(result)+", amount="+amount+", v="+v
-				return parseFloat(result)
 			lateRemainder -= amount
+			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
 		if lateRemainder isnt 0  # There is something left (probably because of rounding)
@@ -154,8 +157,7 @@ balanceAmong = (total, users, txId = 99) !->
 				if randomFromSeed(txId) < 1/++count
 					luckyId = userId
 			Db.shared.modify 'balances', luckyId, (v) -> 
-				result = (v||0) + lateRemainder
-				return parseFloat(result)
+				return (v||0) + lateRemainder
 			log luckyId+" is (un)lucky: "+lateRemainder
 
 # Start a settle for all balances
@@ -261,9 +263,9 @@ exports.client_settleStop = !->
 			id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
 			transaction = {}
 			forData = {}
-			forData[to] = true
+			forData[to] = settle.peek("amount")
 			byData = {}
-			byData[from] = true
+			byData[from] = settle.peek("amount")
 			transaction["creatorId"] = -1
 			transaction["for"] = forData
 			transaction["by"] = byData
@@ -321,28 +323,32 @@ capitalizeFirst = (string) ->
 
 
 importFromV1 = !->
-	Db.shared.set 'x_v1backup', Db.shared.peek()
-	Db.shared.iterate (key) !->
-		if key.key() isnt 'x_v1backup'
-			Db.shared.remove key.key()
 	log "Converting database of old version to new"
-	Db.shared.iterate "x_v1backup", "transactions", (transaction) !->
+	Db.backend.set 'v1backup', Db.shared.peek()
+	Db.shared.iterate (key) !->
+		key.remove()
+	Db.shared.set "balances", "V2"
+	Db.backend.iterate "v1backup", "transactions", (transaction) !->
+		old = Db.shared.peek('transactionId')
 		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-		log "old transaction: "+transaction.key()
+		log "old transaction: "+transaction.key()+", key from="+old+", to="+id
+		#Db.shared.set "transactions", id, id+"-hi"
 		Db.shared.set "transactions", id, "creatorId", transaction.peek("creatorId")
 		Db.shared.set "transactions", id, "text", transaction.peek("description")
 		Db.shared.set "transactions", id, "created", transaction.peek("time")
-		total = (transaction.peek("cents")/100)
+		total = (transaction.peek("cents")/100.0)
 		Db.shared.set "transactions", id, "total", total
 		forData = {}
 		transaction.iterate "borrowers", (user) !->
 			forData[user.key()] = true
 		Db.shared.set "transactions", id, "for", forData
 		byData = {}
-		byData[transaction.peek("lenderId")] = true
+		byData[transaction.peek("lenderId")] = total
 		Db.shared.set "transactions", id, "by", byData
-		balanceAmong total, byData, id
-		balanceAmong -total, forData, id
+		log "byData balanceAmong:"
+		balanceAmong total, byData
+		log "forData balanceAmong:"
+		balanceAmong -total, forData
 
 randomFromSeed = (seed) ->
 	x = Math.sin(seed) * 10000
