@@ -225,21 +225,22 @@ renderView = (txId) !->
 			renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"))
 	# Comments
 	renderSystemComment = (comment) ->
-		log "Custom render called: "+JSON.stringify(comment.peek())
 		if comment.get('system')? and comment.get('system')
 			Dom.div !->
+				Dom.span !->
+					Dom.style color: '#999'
+					Time.deltaText comment.get('t')
+					Dom.text " • "
 				Dom.style
-					margin: '15px 0px 15px 50px'
-					fontSize: '85%'
+					margin: '6px 0px 6px 56px'
+					fontSize: '70%'
 				Event.styleNew(comment.get('t'))
-				Dom.text Plugin.userName(comment.get('u'))+" edited the transaction • "
-				Time.deltaText comment.get('t')
+				Dom.text Plugin.userName(comment.get('u'))+" edited the transaction"
 			return true
 		return false
 	Social.renderComments
 		path: [txId]
 		content: renderSystemComment
-		
 
 renderBalanceSplitSection = (total, path) !->
 	remainder = Obs.create(total)
@@ -397,7 +398,7 @@ renderEditOrNew = (editId) !->
 					userKey = ""
 					byO.iterate (user) !->
 						userKey = user.key()
-					Ui.avatar Plugin.userAvatar(userKey), 
+					Ui.avatar Plugin.userAvatar(userKey),
 						onTap: (!-> Plugin.userInfo(userKey))
 						style: marginRight: "10px"
 					Dom.div !->
@@ -408,23 +409,63 @@ renderEditOrNew = (editId) !->
 						if Db.shared.get("currency")
 							currency = Db.shared.get("currency")
 						Dom.text currency
-						Dom.style 
+						Dom.style
 							margin: '-3px 5px 0 0'
 							fontSize: '21px'
+					inputField = undefined
+					centField = undefined
 					Dom.div !->
 						Dom.style width: '80px', margin: '-20px 0 -20px 0'
 						inputField = Form.input
-							name: 'total'
+							name: 'paidby'
 							type: 'number'
-							text: '0.-'
-							value: edit.peek('total') if edit
-							onChange: (value) ->
-								if value
-									if (value+"").indexOf(",") isnt -1
-										value = (value+"").replace(",", ".")
-									byO.set(userKey, +value)
-									log 'user='+userKey+', write', +value, " byO="+JSON.stringify(byO.peek()) + ", float="+parseFloat(value)
-								return
+							text: '0'
+							inScope: !->
+								Dom.style textAlign: 'right'
+							onChange: (v) !->
+								if v and inputField and centField
+									result = +(inputField.value()+"."+centField.value())
+									if !isNaN(result)
+										byO.set(userKey, result)
+						if byO.peek(userKey)
+							inputField.value Math.floor(byO.peek(userKey))
+						else
+							inputField.value null
+					Dom.div !->
+						Dom.style
+							width: '10px'
+							fontSize: '175%'
+							padding: '12px 0 0 5px'
+							margin: '-20px 0 -20px 0'
+						Dom.text ","
+					Dom.div !->
+						Dom.style width: '50px', margin: '-20px 0 -20px 0'
+						centField = Form.input
+							name: 'paidby2'
+							type: 'number'
+							text: '00'
+							onChange: (v) !->
+								if v<0
+									centField.value(0)
+								if v and inputField and centField
+									result = +(inputField.value()+"."+centField.value())
+									if !isNaN(result)
+										byO.set(userKey, result)
+						if byO.peek(userKey) and byO.peek(userKey)%1.0 isnt 0
+							mod = byO.peek(userKey%1.0)
+							string = (mod.toFixed(2))+""
+							if mod < 0
+								centField.value string.substr(3)
+							else
+								centField.value string.substr(2)
+						else
+							centField.value null
+					Dom.on 'keydown', (evt) !->
+						if evt.getKeyCode() in [188,190] # comma and dot
+							centField.focus()
+							centField.select()
+							evt.kill()
+					,true
 			else
 				# Set form input
 				Obs.observe !->
@@ -461,23 +502,19 @@ renderEditOrNew = (editId) !->
 									Dom.onTap
 										cb: !->
 											value = undefined
+											oldValue = undefined
 											update = Obs.create(false)
 											Obs.observe !->
 												update.get()
-												if value?
-													log "received update"
-													if (value+"").indexOf(",") isnt -1
-														value = (value+"").replace(",", ".")
-													number = +value
+												if oldValue?
+													number = +oldValue
 													if (not (isNaN(number)))
-														#log "number=", number, ", numberIsNaN=", number is NaN
 														if number is 0
 															byO.remove user.key()
 														else
 															byO.set user.key(), number
 													else
-														Modal.show "Incorrect input: \""+value+"\", use a number"
-													#log "Amount updated=", JSON.stringify(byO)
+														Modal.show "Incorrect input: \""+oldValue+"\", use a number"
 												# Do something
 											Modal.show tr("Amount paid by %1?", formatName(user.key())), !->
 												Dom.div !->
@@ -487,27 +524,65 @@ renderEditOrNew = (editId) !->
 														if Db.shared.get("currency")
 															currency = Db.shared.get("currency")
 														Dom.text currency
-														Dom.style 
+														Dom.style
 															margin: '20px 5px 0px 0px'
 															fontSize: '21px'
+													inputField = undefined
+													centField = undefined
 													Dom.div !->
-														Dom.style Flex: true
-														defaultValue = undefined
-														if (byO.peek(user.key())+"") isnt "true" and ((byO.peek(user.key())+"").substr(-1) isnt "%")
-															defaultValue = +byO.peek(user.key())
+														Dom.style width: '80px'
 														inputField = Form.input
 															name: 'paidby'
 															type: 'number'
-															text: '0.-'
-															value: defaultValue
-															onChange: (v) ->
-																if v
-																	value = v
-																return
+															text: '0'
+															inScope: !->
+																Dom.style textAlign: 'right'
+															onChange: (v) !->
+																if v and inputField and centField
+																	oldValue = value
+																	value = inputField.value()+"."+centField.value()
+														if byO.peek(user.key())
+															inputField.value Math.floor(byO.peek(user.key()))
+														else
+															inputField.value null
+													Dom.div !->
+														Dom.style
+															width: '10px'
+															fontSize: '175%'
+															padding: '23px 0 0 4px'
+														Dom.text ","
+													Dom.div !->
+														Dom.style width: '50px'
+														centField = Form.input
+															name: 'paidby2'
+															type: 'number'
+															text: '00'
+															onChange: (v) !->
+																if v<0
+																	centField.value(0)
+																if inputField
+																	oldValue = value
+																	if v
+																		value = inputField.value()+"."+v
+																	else
+																		value = inputField.value()
+														if byO.peek(user.key()) and byO.peek(user.key())%1.0 isnt 0
+															mod = (byO.peek(user.key())%1.0)
+															string = (mod.toFixed(2))+""
+															if mod < 0
+																centField.value string.substr(3)
+															else
+																centField.value string.substr(2)
+														else
+															centField.value null
+													Dom.on 'keydown', (evt) !->
+														if evt.getKeyCode() in [188,190] # comma and dot
+															centField.focus()
+															centField.select()
+															evt.kill()
+													,true
 											, (value) !->
-												log "value="+value
 												if value isnt null and value isnt undefined and value is 'ok'
-													log "update"
 													update.set(true)
 											, ['ok', "Ok", 'cancel', "Cancel"]
 									Dom.style
@@ -537,7 +612,7 @@ renderEditOrNew = (editId) !->
 														data: 'good2'
 														size: 20
 														color: '#080'
-	
+
 		Obs.observe !->
 			if not multiplePaidBy.get() and Plugin.users.count().get() > 1
 				Dom.div !->
@@ -606,7 +681,6 @@ renderEditOrNew = (editId) !->
 					amount = forO.get(user.key())
 					number = Obs.create 0
 					suffix = undefined
-					totalO.get()
 					Obs.observe !->
 						if amount
 							if (amount+"") is "true"
@@ -630,7 +704,7 @@ renderEditOrNew = (editId) !->
 									remainder.modify((v) -> v-number.get())
 									Obs.onClean !->
 										remainder.modify((v) -> v+number.get())
-								suffix = "fixed"							
+								suffix = "fixed"
 					# TODO: Assign possibly remaining part of the total to someone (only for show, server handles balances correctly)
 					Dom.div !-> # Aligning div
 						Dom.style
@@ -655,17 +729,16 @@ renderEditOrNew = (editId) !->
 									if amount?
 										forO.set(user.key(), null)
 									else
-										forO.set(user.key(), true)	
+										forO.set(user.key(), true)
 								longTap: !->
 									value = undefined
+									oldValue = undefined
 									update = Obs.create(false)
 									Obs.observe !->
 										update.get()
 										if value?
-											#log "received update"
+											log "received update: value="+value+", oldValue="+oldValue
 											v = value
-											if (v+"").indexOf(",") isnt -1
-												v = (v+"").replace(",", ".")
 											amount = +v
 											if (v+"").substr(-1) is "%"
 												#log "modal percent received"
@@ -680,7 +753,8 @@ renderEditOrNew = (editId) !->
 														forO.set user.key(), true
 													else
 														forO.set user.key(), v
-											else if not isNaN(amount)
+											else if not isNaN(+oldValue)
+												amount = +oldValue
 												#log "amount=", amount, ", amountIsNaN=", amount is NaN
 												if amount is 0
 													forO.remove user.key()
@@ -697,7 +771,7 @@ renderEditOrNew = (editId) !->
 												Dom.div !->
 													Dom.style Box: 'horizontal'
 													Dom.div !->
-														Dom.style Flex: true
+														Dom.style width: '80px'
 														defaultValue = undefined
 														if (forO.peek(user.key())+"").substr(-1) is "%"
 															defaultValue = (forO.peek(user.key())+"").substr(0, (forO.peek(user.key())+"").length-1)
@@ -713,7 +787,7 @@ renderEditOrNew = (editId) !->
 																log "value="+v
 																return
 													Dom.div !->
-														Dom.style 
+														Dom.style
 															margin: '20px 5px 0px 0px'
 															fontSize: '21px'
 														Dom.text "%"
@@ -725,27 +799,66 @@ renderEditOrNew = (editId) !->
 														if Db.shared.get("currency")
 															currency = Db.shared.get("currency")
 														Dom.text currency
-														Dom.style 
+														Dom.style
 															margin: '20px 5px 0px 0px'
 															fontSize: '21px'
+													inputField = undefined
+													centField = undefined
 													Dom.div !->
-														Dom.style Flex: true
-														defaultValue = undefined
-														if (not (isNaN(+forO.peek(user.key()))))
-															defaultValue = +forO.peek(user.key())
+														Dom.style width: '80px'
 														inputField = Form.input
-															name: 'paidForFixed'+user.key()
+															name: 'paidby'
 															type: 'number'
-															text: '0.-'
-															value:  defaultValue
-															onChange: (v) ->
-																if v
-																	value = v
-																log "value="+v
-																return
+															text: '0'
+															inScope: !->
+																Dom.style textAlign: 'right'
+															onChange: (v) !->
+																if v and inputField and centField
+																	oldValue = value
+																	value = inputField.value()+"."+centField.value()
+														if forO.peek(user.key())
+															inputField.value Math.floor(forO.peek(user.key()))
+														else
+															inputField.value null
+													Dom.div !->
+														Dom.style
+															width: '10px'
+															fontSize: '175%'
+															padding: '23px 0 0 4px'
+														Dom.text ","
+													Dom.div !->
+														Dom.style width: '50px'
+														centField = Form.input
+															name: 'paidby2'
+															type: 'number'
+															text: '00'
+															onChange: (v) !->
+																if v<0
+																	centField.value(0)
+																if inputField
+																	oldValue = value
+																	if v
+																		value = inputField.value()+"."+v
+																	else
+																		value = inputField.value()
+														if forO.peek(user.key()) and forO.peek(user.key())%1.0 isnt 0
+															mod = (byO.peek(user.key())%1.0)
+															string = (mod.toFixed(2))+""
+															if mod < 0
+																centField.value string.substr(3)
+															else
+																centField.value string.substr(2)
+														else
+															centField.value null
+													Dom.on 'keydown', (evt) !->
+														if evt.getKeyCode() in [188,190] # comma and dot
+															centField.focus()
+															centField.select()
+															evt.kill()
+													,true
 										Dom.br()
 										Dom.div !->
-											Dom.style 
+											Dom.style
 												display: 'inline-block'
 												color: Plugin.colors().highlight
 												padding: "5px"
@@ -759,7 +872,7 @@ renderEditOrNew = (editId) !->
 												procentual.set false
 										Dom.text " | "
 										Dom.div !->
-											Dom.style 
+											Dom.style
 												display: 'inline-block'
 												color: Plugin.colors().highlight
 												padding: "5px"
@@ -784,7 +897,7 @@ renderEditOrNew = (editId) !->
 								Dom.style
 									Flex: true
 								Dom.div !->
-									Dom.style 
+									Dom.style
 										Flex: true
 										overflow: 'hidden'
 										textOverflow: 'ellipsis'
@@ -804,7 +917,7 @@ renderEditOrNew = (editId) !->
 												fontSize: '90%'
 											if suffix isnt undefined
 												Dom.div !->
-													Dom.style 
+													Dom.style
 														fontWeight: 'normal'
 														fontSize: '80%'
 														display: 'inline-block'
@@ -815,8 +928,8 @@ renderEditOrNew = (editId) !->
 												data: 'good2'
 												size: 20
 												color: '#080'
-										 
 		Form.condition (values) ->
+			log "checking conditions"
 			if totalO.peek() is 0
 				text = "A transaction with a total of zero is not useful"
 				if Db.shared.peek("transactions", editId)?
@@ -824,15 +937,41 @@ renderEditOrNew = (editId) !->
 				return tr(text)
 			if totalO.peek() < 0
 				return tr("A negative paid by is not possible (switch paid by and paid for)")
-			good = false
-			forO.iterate (user) !->
-				amount = user.peek()
-				if (amount+"") is "true"
-					good = true
-					return
-				else if (amount+"").substr(-1) is "%"
-					good = true
-			if remainder.peek() isnt 0 and not good
+			wrong = false
+			byO.iterate (byEntry) !->
+				wrong = wrong or byEntry.peek() < 0
+			if wrong
+				return tr("You cannot use a negative number")
+			divide = []
+			remainderTemp = totalO.peek()
+			completeShare = 0
+			for userId,amount of forO.peek()
+				if (amount+"").substr(-1) is "%"
+					amount = amount+""
+					percent = +(amount.substring(0, amount.length-1))
+					completeShare += percent
+					divide.push userId
+				else if (""+amount) is "true"
+					divide.push userId
+					completeShare += 100
+				else
+					number = +amount
+					amount = Math.round(amount*100.0)/100.0
+					if amount < 0
+						return tr("You cannot use a negative number")
+					remainderTemp -= amount
+			if remainderTemp isnt 0 and divide.length > 0
+				while userId = divide.pop()
+					raw = forO.peek(userId)
+					percent = 100
+					if (raw+"").substr(-1) is "%"
+						raw = raw+""
+						percent = +(raw.substring(0, raw.length-1))
+					amount = Math.round((remainderTemp*100.0)/completeShare*percent)/100.0
+					if amount < 0
+						return tr("You cannot use a negative number")
+				remainderTemp = 0
+			if remainderTemp isnt 0
 				return tr("The by and for section do not match")
 	Dom.div !->
 		Dom.style
