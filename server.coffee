@@ -56,7 +56,7 @@ exports.client_transaction = (id, data) !->
 		data["updated"] = (new Date())/1000
 	data.total = +data.total
 	
-	Db.shared.set 'transactions', id, data	
+	Db.shared.set 'transactions', id, data
 	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
 	balanceAmong data.total, data.by, id
 	balanceAmong -data.total, data.for, id
@@ -69,17 +69,21 @@ exports.client_transaction = (id, data) !->
 	if isNew
 		Event.create
 			unit: "transaction"
-			text: "New "+formatMoney(Db.shared.peek("transactions", id, "total"))+" transaction created: "+Db.shared.peek("transactions", id, "text")
+			text: Plugin.userName()+" added transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
 			include: members
+			sender: Plugin.userId()
 	else
 		# TODO: specify what has been changed?
 		Event.create
 			unit: "transaction"
-			text: "Transaction updated: "+Db.shared.peek("transactions", id, "text")
+			text: Plugin.userName()+" edited transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
+			path: [id]
 			include: members
+			sender: Plugin.userId()
+
 		# Add system comment
 		Social.customComment id,
-			c: "Edited the transaction"
+			c: "edited the transaction"
 			t: Math.round(new Date()/1000)
 			u: Plugin.userId()
 			system: true
@@ -128,7 +132,7 @@ balanceAmong = (total, users, txId = 99) !->
 			if (total < 0)
 				number = -number
 			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> 
+			newValue = Db.shared.modify 'balances', userId, (v) ->
 				return (v||0) + number
 			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
@@ -142,7 +146,7 @@ balanceAmong = (total, users, txId = 99) !->
 				percent = +(raw.substring(0, raw.length-1))
 			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
 			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> 
+			newValue = Db.shared.modify 'balances', userId, (v) ->
 				#log "v="+v
 				return (v||0) + amount
 				#log "result="+result+", parsed="+parseFloat(result)+", amount="+amount+", v="+v
@@ -156,7 +160,7 @@ balanceAmong = (total, users, txId = 99) !->
 			for userId of users
 				if randomFromSeed(txId) < 1/++count
 					luckyId = userId
-			Db.shared.modify 'balances', luckyId, (v) -> 
+			Db.shared.modify 'balances', luckyId, (v) ->
 				return (v||0) + lateRemainder
 			log luckyId+" is (un)lucky: "+lateRemainder
 
@@ -230,7 +234,7 @@ exports.reminder = (args) ->
 	[from,to] = args.users.split(':')
 	Event.create
 		unit: "settlePayRemind"
-		text: "There is an open settle to "+Plugin.userName(to)+"."
+		text: "Reminder: there is an open settle to "+Plugin.userName(to)
 		include: from
 	Timer.set 1000*60*60*24*7, 'reminder', args
 
@@ -243,7 +247,7 @@ exports.settleRemind = (args) ->
 			users.push userId
 	Event.create
 		unit: "settleRemind"
-		text: "There are balances to settle, open the plugin to start a settle."
+		text: "Reminder: there are balances to settle"
 		include: users
 	Timer.set 1000*60*60*24*7, 'settleRemind', args
 
@@ -276,7 +280,7 @@ exports.client_settleStop = !->
 	if allDone
 		Event.create
 			unit: "settleFinish"
-			text: "A settle has been finished, everything is paid"
+			text: "Settling has finished, everything has been paid"
 			include: members
 	Db.shared.remove 'settle'
 
@@ -288,7 +292,7 @@ exports.client_settlePayed = (key) !->
 	if done is 1 or done is 3
 		Event.create
 			unit: "settlePaid"
-			text: Plugin.userName(from)+" paid "+formatMoney(Db.shared.peek("settle", key, "amount"))+" to you to settle"
+			text: Plugin.userName(from)+" paid you "+formatMoney(Db.shared.peek("settle", key, "amount"))+" to settle, please confirm"
 			include: [to]
 
 # Receiver marks settle as paid

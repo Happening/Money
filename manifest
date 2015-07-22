@@ -1,4 +1,5 @@
-name: Money v2
-description: Money plugin version 2
+name: Split the bill
+description: Keep track of who owes money to whom.
 api: 2
 icon: coins
+hint: Keep track of who owes money to whom
