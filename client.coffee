@@ -741,21 +741,22 @@ renderEditOrNew = (editId) !->
 											v = value
 											amount = +v
 											if (v+"").substr(-1) is "%"
-												#log "modal percent received"
+												log "modal percent received"
 												percent = +((v+"").substr(0, v.length-1))
+												if isNaN(percent)
+													Modal.show "Incorrect percentage: \""+v+"\""
+													return
 												if percent < 0
 													Modal.show "Use a percentage above 0 instead of "+v+"."
 													return
 												else
 													if percent is 0
 														forO.remove user.key()
-													else if percent is 100
-														forO.set user.key(), true
 													else
 														forO.set user.key(), v
 											else if not isNaN(+oldValue)
 												amount = +oldValue
-												#log "amount=", amount, ", amountIsNaN=", amount is NaN
+												log "amount=", amount, ", amountIsNaN=", amount is NaN
 												if amount is 0
 													forO.remove user.key()
 												else
@@ -765,7 +766,7 @@ renderEditOrNew = (editId) !->
 												Modal.show "Incorrect input: \""+v+"\", use a number for a fixed amount or a percentage"
 											log "Amount updated=", forO
 									Modal.show tr("Amount paid for %1?", formatName(user.key())), !->
-										procentual = Obs.create false
+										procentual = Obs.create (forO.peek(user.key())+"").substr(-1) is "%"
 										Obs.observe !->
 											if procentual.get()
 												Dom.div !->
@@ -775,8 +776,6 @@ renderEditOrNew = (editId) !->
 														defaultValue = undefined
 														if (forO.peek(user.key())+"").substr(-1) is "%"
 															defaultValue = (forO.peek(user.key())+"").substr(0, (forO.peek(user.key())+"").length-1)
-														else if (forO.peek(user.key())+"") is "true"
-															defaultValue = 100
 														inputField = Form.input
 															name: 'paidForPercent'+user.key()
 															text: '100'
@@ -816,7 +815,7 @@ renderEditOrNew = (editId) !->
 																if v and inputField and centField
 																	oldValue = value
 																	value = inputField.value()+"."+centField.value()
-														if forO.peek(user.key())
+														if forO.peek(user.key()) and (forO.peek(user.key())+"") isnt "true"
 															inputField.value Math.floor(forO.peek(user.key()))
 														else
 															inputField.value null
