@@ -325,6 +325,11 @@ formatMoney = (amount) ->
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
 
+restoreFromV1 = !->
+	log "Restoring database of old version"
+	Db.shared.iterate (key) !->
+		key.remove()
+	Db.shared.set Db.backend.peek('v1backup')
 
 importFromV1 = !->
 	log "Converting database of old version to new"
@@ -350,9 +355,9 @@ importFromV1 = !->
 		byData[transaction.peek("lenderId")] = total
 		Db.shared.set "transactions", id, "by", byData
 		log "byData balanceAmong:"
-		balanceAmong total, byData
+		balanceAmong total, byData, id
 		log "forData balanceAmong:"
-		balanceAmong -total, forData
+		balanceAmong -total, forData, id
 
 randomFromSeed = (seed) ->
 	x = Math.sin(seed) * 10000
