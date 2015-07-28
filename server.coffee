@@ -54,16 +54,16 @@ exports.client_transaction = (id, data) !->
 	else
 		# Undo previous data on balance
 		prevData = Db.shared.get 'transactions', id
-		balanceAmong -prevData.total, prevData.by, id, true
-		balanceAmong prevData.total, prevData.for, id, true
+		balanceAmong prevData.total, prevData.by, id, true
+		balanceAmong prevData.total, prevData.for, id, false
 		data["created"] = Db.shared.peek("transactions", id, "created")
 		data["updated"] = (new Date())/1000
 	data.total = +data.total
-	
+
 	Db.shared.set 'transactions', id, data
 	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
-	balanceAmong data.total, data.by, id
-	balanceAmong -data.total, data.for, id
+	balanceAmong data.total, data.by, id, false
+	balanceAmong data.total, data.for, id, true
 	# Send notifications
 	members = []
 	Db.shared.iterate "transactions", id, "for", (user) !->
@@ -106,13 +106,13 @@ exports.client_removeTransaction = (id) !->
 	# TODO: Only by admin? Only by creator?
 	transaction = Db.shared.ref("transactions", id)
 	# Undo transaction balance changes
-	balanceAmong -transaction.peek("total"), transaction.peek("by"), id, true
-	balanceAmong transaction.peek("total"), transaction.peek("for"), id, true
+	balanceAmong transaction.peek("total"), transaction.peek("by"), id, true
+	balanceAmong transaction.peek("total"), transaction.peek("for"), id, false
 	# Remove transaction
 	Db.shared.remove("transactions", id)
 
 # Process a transaction and update balances
-balanceAmong = (total, users, txId = 99, undo = false) !->
+balanceAmong = (total, users, txId = 99, invert) !->
 	log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
 	divide = []
 	remainder = total
@@ -127,12 +127,12 @@ balanceAmong = (total, users, txId = 99, undo = false) !->
 			divide.push userId
 			totalShare += 100
 		else
-			number = (if undo then -1 else 1) * Math.round(+amount*100.0)/100.0
+			number = Math.round(+amount*100.0)/100.0
 			remainder -= number
 			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + number
+			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) * number
 			log "userId="+userId+", total="+total+", old="+old+", balance+="+number+", new="+newValue
-	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
+	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder
 	if remainder isnt 0 and divide.length > 0
 		lateRemainder = remainder
 		while userId = divide.pop()
@@ -144,7 +144,7 @@ balanceAmong = (total, users, txId = 99, undo = false) !->
 			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
 			lateRemainder -= amount
 			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + amount
+			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) *  amount
 			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
@@ -152,11 +152,28 @@ balanceAmong = (total, users, txId = 99, undo = false) !->
 			# random user gets (un)lucky
 			count = 0
 			for userId of users
+				count++
+			selected = Math.floor(randomFromSeed(txId)*count)
+			selected-- if selected is count
+			log "count="+count+", transactionNumber="+txId+", selected="+selected+", random="+randomFromSeed(txId)
+			counter = 0
+			for userId of users
+				if selected is counter
+					luckyId = userId
+				counter++
+			Db.shared.modify 'balances', luckyId, (v) ->
+				return (v||0) + (if invert then -1 else 1) *  lateRemainder
+
+			###
+			count = 0
+
+			for userId of users
 				if randomFromSeed(txId) < 1/++count
 					luckyId = userId
 			Db.shared.modify 'balances', luckyId, (v) ->
-				return (v||0) + lateRemainder
-			log luckyId+" is (un)lucky: "+lateRemainder
+				return (v||0) + (if invert then -1 else 1) *  lateRemainder
+			###
+			log Plugin.userName(luckyId)+" ("+luckyId+") is (un)lucky: "+lateRemainder
 
 # Start a settle for all balances
 exports.client_settleStart = !->
@@ -349,9 +366,9 @@ importFromV1 = !->
 		byData[transaction.peek("lenderId")] = total
 		Db.shared.set "transactions", id, "by", byData
 		log "byData balanceAmong:"
-		balanceAmong total, byData, id
+		balanceAmong total, byData, id, false
 		log "forData balanceAmong:"
-		balanceAmong -total, forData, id
+		balanceAmong total, forData, id, true
 
 # duplicated in client.coffee
 randomFromSeed = (seed) ->

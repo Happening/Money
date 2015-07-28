@@ -19,7 +19,7 @@ randomFromSeed = (seed) ->
 	x-Math.floor(x)
 
 exports.render = ->
-	log "Plugin.api() = "+Plugin.api()
+	#log "Plugin.api() = "+Plugin.api()
 	if Plugin.api() <= 1
 		Dom.text "Reload the happening"
 		return
@@ -214,12 +214,12 @@ renderView = (txId) !->
 		Dom.div !->
 			Dom.style marginTop: "15px"
 			Dom.h2 tr("Paid by")
-			renderBalanceSplitSection(transaction.get("total"), transaction.ref("by"))
+			renderBalanceSplitSection(transaction.get("total"), transaction.ref("by"), transaction.key())
 		# Render paid for items
 		Dom.div !->
 			Dom.style marginTop: "15px"
 			Dom.h2 tr("Paid for")
-			renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"))
+			renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"), transaction.key())
 	# Comments
 	renderSystemComment = (comment) ->
 		if comment.get('system')? and comment.get('system')
@@ -239,8 +239,9 @@ renderView = (txId) !->
 		path: [txId]
 		content: renderSystemComment
 
-renderBalanceSplitSection = (total, path) !->
+renderBalanceSplitSection = (total, path, transactionNumber) !->
 	remainder = Obs.create(total)
+	lateRemainder = Obs.create(total)
 	totalShare = Obs.create(0)
 	Obs.observe !->
 		path.iterate (user) !->
@@ -255,24 +256,32 @@ renderBalanceSplitSection = (total, path) !->
 				Obs.onClean !->
 					totalShare.modify((v) -> v-percent)
 	Obs.observe !->
-		log "totalShare="+totalShare.peek()+", totalO="+total+", remainder="+remainder.peek()
+		#log "totalShare="+totalShare.peek()+", totalO="+total+", remainder="+remainder.peek()
 		path.iterate (user) !->
 			amount = user.get()
 			number = 0
 			suffix = undefined
 			if amount is true
 				number = Math.round((remainder.get()*100.0)/totalShare.get()*100.0)/100.0
+				lateRemainder.modify((v) -> v-number)
+				Obs.onClean !->
+					lateRemainder.modify((v) -> v+number)
 			else if (amount+"").substr(-1) is "%"
 				amount = amount+""
 				percent = +(amount.substr(0, amount.length-1))
 				number = Math.round((remainder.get()*100.0)/totalShare.get()*percent)/100.0
+				lateRemainder.modify((v) -> v-number)
+				Obs.onClean !->
+					lateRemainder.modify((v) -> v+number)
 				suffix = percent+"%"
 			else
 				number = +amount
 				remainder.modify (v) -> v-number
+				lateRemainder.modify (v) -> v-number
 				suffix = "fixed"
 				Obs.onClean !->
 					remainder.modify((v) -> v+number)
+					lateRemainder.modify((v) -> v+number)
 			# TODO: Assign possibly remaining part of the total to someone
 			Ui.item !->
 				Ui.avatar Plugin.userAvatar(user.key()),
@@ -284,7 +293,21 @@ renderBalanceSplitSection = (total, path) !->
 				Dom.div !->
 					Dom.style textAlign: 'right'
 					Dom.div !->
-						Dom.text formatMoney(number)
+						count = 0
+						value = number
+						for userId, dummy of path.peek()
+							count++
+						selected = Math.floor(randomFromSeed(transactionNumber)*count)
+						selected-- if selected is count
+						#log "count="+count+", transactionNumber="+transactionNumber+", selected="+selected+", random="+randomFromSeed(transactionNumber)
+						counter = 0
+						for userId, dummy of path.peek()
+							if selected is counter
+								luckyId = userId
+							counter++
+						if (luckyId+"") is (user.key()+"")
+							value += lateRemainder.get()
+						Dom.text formatMoney(value)
 					if suffix isnt undefined
 						Dom.div !->
 							Dom.style fontSize: '80%'
@@ -390,7 +413,7 @@ renderEditOrNew = (editId) !->
 			value: byO.peek()
 		Obs.observe !->
 			handleChange byO.get()
-			log "byO form updated"
+			#log "byO form updated"
 		# Render page
 		Obs.observe !->
 			if not multiplePaidBy.get()
@@ -468,7 +491,7 @@ renderEditOrNew = (editId) !->
 			else
 				# Set form input
 				Obs.observe !->
-					log "users reresh"
+					#log "users reresh"
 					Dom.div !->
 						Dom.style margin: '5px -5px 0 -5px'
 						Plugin.users.iterate (user) !->
@@ -631,11 +654,14 @@ renderEditOrNew = (editId) !->
 		log 'full list refresh'
 		# Setup remainder
 		remainder = Obs.create(0)
+		lateRemainder = Obs.create(0)
 		Obs.observe !->
 			oldTotal = totalO.peek()
 			remainder.modify((v)->v+totalO.get())
+			lateRemainder.modify((v)->v+totalO.get())
 			Obs.onClean !->
 				remainder.modify((v)->v-oldTotal)
+				lateRemainder.modify((v)->v-oldTotal)
 			#log "remainder update: "+remainder.peek()
 		# Setup for
 		forO = Obs.create {}
@@ -646,7 +672,7 @@ renderEditOrNew = (editId) !->
 			value: forO.peek()
 		Obs.observe !->
 			handleChange forO.get()
-			log "forO form updated"
+			#log "forO form updated"
 		# Setup totalshare
 		totalShare = Obs.create(0)
 		# Select/deselect all button
@@ -664,16 +690,16 @@ renderEditOrNew = (editId) !->
 					fontSize: '80%'
 				Dom.onTap !->
 					if selected < users
-						log "Select all"
+						#log "Select all"
 						Plugin.users.iterate (user) !->
 							if forO.peek(user.key()) is undefined
 								forO.set(user.key(), true)
 					else
-						log "Deselect all"
+						#log "Deselect all"
 						forO.set {}
 		# Render page
 		Obs.observe !->
-			log "users refresh"
+			#log "users refresh"
 			Dom.div !->
 				Dom.style margin: '5px -5px 0 -5px', _userSelect: 'none'
 				Plugin.users.iterate (user) !->
@@ -687,7 +713,11 @@ renderEditOrNew = (editId) !->
 								Obs.onClean !->
 									totalShare.modify((v) -> v-100)
 								Obs.observe !->
-									number.set(Math.round((remainder.get()*100.0)/totalShare.get()*100)/100.0)
+									currentNumber = Math.round((remainder.get()*100.0)/totalShare.get()*100)/100.0
+									number.set(currentNumber)
+									lateRemainder.modify((v) -> v-currentNumber)
+									Obs.onClean !->
+										lateRemainder.modify((v) -> v+currentNumber)
 							else if (amount+"").substr(-1) is "%"
 								amount = amount+""
 								percent = +(amount.substr(0, amount.length-1))
@@ -695,14 +725,20 @@ renderEditOrNew = (editId) !->
 								Obs.onClean !->
 									totalShare.modify((v) -> v-percent)
 								Obs.observe !->
-									number.set(Math.round((remainder.get()*100.0)/totalShare.get()*percent)/100.0)
+									currentNumber = Math.round((remainder.get()*100.0)/totalShare.get()*percent)/100.0
+									number.set(currentNumber)
+									lateRemainder.modify((v) -> v-currentNumber)
+									Obs.onClean !->
+										lateRemainder.modify((v) -> v+currentNumber)
 								suffix = percent+"%"
 							else
 								number.set(+amount)
 								Obs.observe !->
 									remainder.modify((v) -> v-number.get())
+									lateRemainder.modify((v) -> v-number.get())
 									Obs.onClean !->
 										remainder.modify((v) -> v+number.get())
+										lateRemainder.modify((v) -> v+number.get())
 								suffix = "fixed"
 					# TODO: Assign possibly remaining part of the total to someone (only for show, server handles balances correctly)
 					Dom.div !-> # Aligning div
@@ -736,11 +772,11 @@ renderEditOrNew = (editId) !->
 									Obs.observe !->
 										update.get()
 										if value?
-											log "received update: value="+value+", oldValue="+oldValue
+											#log "received update: value="+value+", oldValue="+oldValue
 											v = value
 											amount = +v
 											if (v+"").substr(-1) is "%"
-												log "modal percent received"
+												#log "modal percent received"
 												percent = +((v+"").substr(0, v.length-1))
 												if isNaN(percent)
 													Modal.show "Incorrect percentage: \""+v+"\""
@@ -755,7 +791,7 @@ renderEditOrNew = (editId) !->
 														forO.set user.key(), v
 											else if not isNaN(+oldValue)
 												amount = +oldValue
-												log "amount=", amount, ", amountIsNaN=", amount is NaN
+												#log "amount=", amount, ", amountIsNaN=", amount is NaN
 												if amount is 0
 													forO.remove user.key()
 												else
@@ -763,7 +799,7 @@ renderEditOrNew = (editId) !->
 											else
 												#log "incorrect for"
 												Modal.show "Please enter a number"
-											log "Amount updated=", forO
+											#log "Amount updated=", forO
 									Modal.show tr("Amount paid for %1?", formatName(user.key())), !->
 										procentual = Obs.create (forO.peek(user.key())+"").substr(-1) is "%"
 										Obs.observe !->
@@ -783,7 +819,7 @@ renderEditOrNew = (editId) !->
 															onChange: (v) ->
 																if v
 																	value = v+"%"
-																log "value="+v
+																#log "value="+v
 																return
 													Dom.div !->
 														Dom.style
@@ -884,7 +920,7 @@ renderEditOrNew = (editId) !->
 											Dom.onTap !->
 												procentual.set true
 									, (value) !->
-										log "value submit="+value
+										#log "value submit="+value
 										if value and value is 'ok'
 											update.set(true)
 									, ['cancel', "Cancel", 'ok', "Ok"]
@@ -910,7 +946,23 @@ renderEditOrNew = (editId) !->
 										Dom.style Box: 'horizontal'
 										Dom.div !->
 											Dom.style Flex: true
-											Dom.text formatMoney(number.get())
+											value = number.get()
+											transactionNumber = (Db.shared.get('transactionId')||0)+1
+											transactionNumber = editId if editId
+											count = 0
+											for userId, dummy of forO.peek()
+												count++
+											selected = Math.floor(randomFromSeed(transactionNumber)*count)
+											selected-- if selected is count
+											#log "count="+count+", transactionNumber="+transactionNumber+", selected="+selected+", random="+randomFromSeed(transactionNumber)
+											counter = 0
+											for userId, dummy of forO.peek()
+												if selected is counter
+													luckyId = userId
+												counter++
+											if (luckyId+"") is (user.key()+"")
+												value += lateRemainder.get()
+											Dom.text formatMoney(value)
 											Dom.style
 												fontWeight: 'normal'
 												fontSize: '90%'
@@ -928,7 +980,7 @@ renderEditOrNew = (editId) !->
 												size: 20
 												color: '#080'
 		Form.condition (values) ->
-			log "checking conditions"
+			#log "checking conditions"
 			if totalO.peek() is 0
 				text = "Total sum cannot be zero"
 				if Db.shared.peek("transactions", editId)?
@@ -979,7 +1031,7 @@ renderEditOrNew = (editId) !->
 				Modal.confirm "Remove transaction",
 					"Are you sure you want to remove this transaction?",
 					!->
-						log "Confirmed"
+						#log "Confirmed"
 						Server.call 'removeTransaction', editId
 						# Back to the main page
 						Page.back()
@@ -1149,7 +1201,7 @@ exports.renderSettings = !->
 		currencyInput = Form.input
 			name: 'currency'
 			text: text
-	log "currencyInput: ", currencyInput
+	#log "currencyInput: ", currencyInput
 	renderCurrency = (value) !->
 		Ui.button !->
 			Dom.text value
@@ -1185,7 +1237,7 @@ calculateShare = (transaction, id) ->
 				remainder -= amount
 				if (userId+"") is (id+"")
 					return amount
-		#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
+		#log "total="+total+", totalShare="+totalShare+", remainder="+remainder
 		result = 0
 		if remainder isnt 0 and divide.length > 0
 			lateRemainder = remainder
@@ -1205,31 +1257,22 @@ calculateShare = (transaction, id) ->
 				# random user gets (un)lucky
 				count = 0
 				for userId, dummy of section.peek()
-					if randomFromSeed(transaction.key()) < 1/++count
+					count++
+				selected = Math.floor(randomFromSeed(transaction.key())*count)
+				selected-- if selected is count
+				counter = 0
+				for userId, dummy of section.peek()
+					if selected is counter
 						luckyId = userId
-				if +luckyId is +id
+					counter++
+				if (luckyId+"") is (id+"")
 					result += lateRemainder
 
 		return result
-		#lateRemainder -= amount
-		#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
-		#log "lateRemainder="+lateRemainder
-		###
-		if lateRemainder isnt 0  # There is something left (probably because of rounding)
-			# random user gets (un)lucky
-			count = 0
-			for userId of users
-				if Math.random() < 1/++count
-					luckyId = userId
-			Db.shared.modify 'balances', luckyId, (v) -> 
-				result = (v||0) + lateRemainder
-				return parseFloat(result)
-			log luckyId+" is (un)lucky: "+lateRemainder
-		###
 	byAmount = calculatePart(transaction.ref('by'), transaction.get('total'), id)
 	forAmount = calculatePart(transaction.ref('for'), transaction.get('total'), id)
 	result = byAmount - forAmount
-	log "byAmount="+byAmount+", forAmount="+forAmount+", result="+result
+	#log "byAmount="+byAmount+", forAmount="+forAmount+", result="+result
 	return result
 
 stylePositiveNegative = (amount) !->
