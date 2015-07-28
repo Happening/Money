@@ -13,6 +13,10 @@ Social = require 'social'
 Time = require 'time'
 Event = require 'event'
 
+# duplicated in client.coffee
+randomFromSeed = (seed) ->
+	x = Math.sin(seed) * 10000
+	x-Math.floor(x)
 
 exports.render = ->
 	log "Plugin.api() = "+Plugin.api()
@@ -76,6 +80,7 @@ exports.render = ->
 		# Latest transactions
 		if Db.shared.count("transactions").get() isnt 0
 			Db.shared.iterate 'transactions', (tx) !->
+				log '>>> tx', tx.key()
 				Ui.item !->
 					Dom.style padding: '10px 8px 10px 8px'
 					Dom.div !->
@@ -446,7 +451,7 @@ renderEditOrNew = (editId) !->
 									result = +(inputField.value()+"."+centField.value())
 									if !isNaN(result)
 										byO.set(userKey, result)
-						if b = byO.peek(userKey) and (mod = b%1.0) isnt 0
+						if (b = byO.peek(userKey)) and (mod = b%1.0) isnt 0
 							string = (mod.toFixed(2))+""
 							if mod < 0
 								centField.value string.substr(3)
@@ -929,13 +934,7 @@ renderEditOrNew = (editId) !->
 				if Db.shared.peek("transactions", editId)?
 					text += " (remove it instead)"
 				return tr(text)
-			if totalO.peek() < 0
-				return tr("Paid by can not be negative (switch paid by and paid for)")
-			wrong = false
-			byO.iterate (byEntry) !->
-				wrong = wrong or byEntry.peek() < 0
-			if wrong
-				return tr("You cannot use a negative number")
+
 			divide = []
 			remainderTemp = totalO.peek()
 			completeShare = 0
@@ -951,8 +950,6 @@ renderEditOrNew = (editId) !->
 				else
 					number = +amount
 					amount = Math.round(amount*100.0)/100.0
-					if amount < 0
-						return tr("You cannot use a negative number")
 					remainderTemp -= amount
 			if remainderTemp isnt 0 and divide.length > 0
 				while userId = divide.pop()
@@ -962,8 +959,6 @@ renderEditOrNew = (editId) !->
 						raw = raw+""
 						percent = +(raw.substring(0, raw.length-1))
 					amount = Math.round((remainderTemp*100.0)/completeShare*percent)/100.0
-					if amount < 0
-						return tr("You cannot use a negative number")
 				remainderTemp = 0
 			if remainderTemp isnt 0
 				return tr("Paid by and paid for do not add up")
@@ -1191,8 +1186,9 @@ calculateShare = (transaction, id) ->
 				if (userId+"") is (id+"")
 					return amount
 		#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
+		result = 0
 		if remainder isnt 0 and divide.length > 0
-			#lateRemainder = remainder
+			lateRemainder = remainder
 			while userId = divide.pop()
 				raw = section.peek(userId)
 				percent = 100
@@ -1200,9 +1196,21 @@ calculateShare = (transaction, id) ->
 					raw = raw+""
 					percent = +(raw.substring(0, raw.length-1))
 				amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
+				lateRemainder -= amount
 				if (userId+"") is (id+"")
-					return parseFloat(amount)
-		return 0
+					result = parseFloat(amount)
+					log 'result for userId '+userId+' : '+result
+
+			if lateRemainder isnt 0  # There is something left (probably because of rounding)
+				# random user gets (un)lucky
+				count = 0
+				for userId, dummy of section.peek()
+					if randomFromSeed(transaction.key()) < 1/++count
+						luckyId = userId
+				if +luckyId is +id
+					result += lateRemainder
+
+		return result
 		#lateRemainder -= amount
 		#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
@@ -1221,7 +1229,7 @@ calculateShare = (transaction, id) ->
 	byAmount = calculatePart(transaction.ref('by'), transaction.get('total'), id)
 	forAmount = calculatePart(transaction.ref('for'), transaction.get('total'), id)
 	result = byAmount - forAmount
-	#log "byAmount="+byAmount+", forAmount="+forAmount+", result="+result
+	log "byAmount="+byAmount+", forAmount="+forAmount+", result="+result
 	return result
 
 stylePositiveNegative = (amount) !->

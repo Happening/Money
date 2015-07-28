@@ -6,6 +6,10 @@ Social = require 'social'
 
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
+
+	#restoreFromV1()
+	#return
+
 	if not(Db.shared.isHash("balances"))
 		log "is old version"
 		importFromV1()
@@ -50,8 +54,8 @@ exports.client_transaction = (id, data) !->
 	else
 		# Undo previous data on balance
 		prevData = Db.shared.get 'transactions', id
-		balanceAmong -prevData.total, prevData.by, id
-		balanceAmong prevData.total, prevData.for, id
+		balanceAmong -prevData.total, prevData.by, id, true
+		balanceAmong prevData.total, prevData.for, id, true
 		data["created"] = Db.shared.peek("transactions", id, "created")
 		data["updated"] = (new Date())/1000
 	data.total = +data.total
@@ -102,13 +106,13 @@ exports.client_removeTransaction = (id) !->
 	# TODO: Only by admin? Only by creator?
 	transaction = Db.shared.ref("transactions", id)
 	# Undo transaction balance changes
-	balanceAmong -transaction.peek("total"), transaction.peek("by"), id
-	balanceAmong transaction.peek("total"), transaction.peek("for"), id
+	balanceAmong -transaction.peek("total"), transaction.peek("by"), id, true
+	balanceAmong transaction.peek("total"), transaction.peek("for"), id, true
 	# Remove transaction
 	Db.shared.remove("transactions", id)
 
 # Process a transaction and update balances
-balanceAmong = (total, users, txId = 99) !->
+balanceAmong = (total, users, txId = 99, undo = false) !->
 	log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
 	divide = []
 	remainder = total
@@ -123,18 +127,11 @@ balanceAmong = (total, users, txId = 99) !->
 			divide.push userId
 			totalShare += 100
 		else
-			number = +amount
-			amount = Math.round(amount*100.0)/100.0
-			if total < 0
-				remainder += amount
-			else
-				remainder -= amount
-			if (total < 0)
-				number = -number
+			number = (if undo then -1 else 1) * Math.round(+amount*100.0)/100.0
+			remainder -= number
 			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) ->
-				return (v||0) + number
-			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
+			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + number
+			log "userId="+userId+", total="+total+", old="+old+", balance+="+number+", new="+newValue
 	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder	
 	if remainder isnt 0 and divide.length > 0
 		lateRemainder = remainder
@@ -145,12 +142,9 @@ balanceAmong = (total, users, txId = 99) !->
 				raw = raw+""
 				percent = +(raw.substring(0, raw.length-1))
 			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
-			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) ->
-				#log "v="+v
-				return (v||0) + amount
-				#log "result="+result+", parsed="+parseFloat(result)+", amount="+amount+", v="+v
 			lateRemainder -= amount
+			old = Db.shared.peek('balances', userId)
+			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + amount
 			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
@@ -359,6 +353,7 @@ importFromV1 = !->
 		log "forData balanceAmong:"
 		balanceAmong -total, forData, id
 
+# duplicated in client.coffee
 randomFromSeed = (seed) ->
 	x = Math.sin(seed) * 10000
 	return x-Math.floor(x)
