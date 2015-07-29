@@ -291,17 +291,23 @@ exports.client_settlePayed = (key) !->
 exports.client_settleDone = (key) !->
 	amount = Db.shared.get 'settle', key, 'amount'
 	[from,to] = key.split(':')
-	return if !amount? or Plugin.userId() != +to
+	return if !amount? or (Plugin.userId() != +to and !Plugin.userIsAdmin())
 	done = Db.shared.modify 'settle', key, 'done', (v) -> (v&~2) | ((v^2)&2)
 	amount = -amount if !(done&2)
 	Db.shared.modify 'balances', from, (v) -> (v||0) + amount
 	Db.shared.modify 'balances', to, (v) -> (v||0) - amount
+	admin = Plugin.userId() != +to
 	if done is 2 or done is 3
-		Event.create
-			unit: "settleDone"
-			text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
-			include: [from]
-
+		if admin
+			Event.create
+				unit: "settleDone"
+				text: "Admin "+Plugin.userName(Plugin.userId())+" confirmed a "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+				include: [from, to]
+		else
+			Event.create
+				unit: "settleDone"
+				text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+				include: [from]
 
 # Set account of a user
 exports.client_account = (text) !->

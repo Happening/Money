@@ -76,7 +76,6 @@ exports.render = ->
 		# Latest transactions
 		if Db.shared.count("transactions").get() isnt 0
 			Db.shared.iterate 'transactions', (tx) !->
-				log '>>> tx', tx.key()
 				Ui.item !->
 					Dom.style padding: '10px 8px 10px 8px'
 					Dom.div !->
@@ -120,18 +119,21 @@ renderBalances = !->
 	Page.setTitle "All balances"
 	Ui.list !->
 		Dom.h2 tr("Balances")
-		Plugin.users.iterate (user) !->
+		renderItem = (userId, balance) !->
 			Ui.item !->
-				balance = (Db.shared.get("balances", user.key()) ||0)
 				stylePositiveNegative(balance)
-				Ui.avatar Plugin.userAvatar(user.key()),
-					onTap: (!-> Plugin.userInfo(user.key()))
+				Ui.avatar Plugin.userAvatar(userId),
+					onTap: (!-> Plugin.userInfo(userId))
 					style: marginRight: "10px"
 				Dom.div !->
 					Dom.style Flex: true
-					Dom.div formatName(user.key(), true)
+					Dom.div formatName(userId, true)
 				Dom.div !->
 					Dom.text formatMoney(balance)
+		Db.shared.iterate "balances", (user) !->
+			if (!(Plugin.users.get(user.key())?)) and (user.get()||0) is 0
+				return
+			renderItem user.key(), user.get()
 		, (user) ->
 			# Sort users with zero balance to the bottom
 			number = Db.shared.get("balances", user.key())||0
@@ -139,6 +141,9 @@ renderBalances = !->
 				return 9007199254740991
 			else
 				return number
+		Plugin.users.iterate (user) !->
+			if !(Db.shared.get("balances", user.key())?)
+				renderItem user.key(), Db.shared.get "balances", user.key()
 
 		settleO = Db.shared.ref('settle')
 		if !settleO.isHash()
@@ -153,7 +158,7 @@ renderBalances = !->
 					Dom.div !->
 						Dom.style textAlign: 'right'
 						Ui.button tr("Initiate settle"), !->
-							require('modal').confirm tr("Initiate settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
+							Modal.confirm tr("Initiate settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
 								Server.call 'settleStart'
 				else
 					Dom.div !->
@@ -958,7 +963,7 @@ renderEditOrNew = (editId) !->
 												data: 'good2'
 												size: 20
 												color: '#080'
-		Form.condition (values) ->
+		Form.condition () ->
 			#log "checking conditions"
 			if totalO.peek() is 0
 				text = "Total sum cannot be zero"
@@ -1035,7 +1040,7 @@ getSortValue = (key) ->
 		return 10
 	else
 		return -1
-	
+
 renderSettlePane = (settleO) !->
 	Ui.list !->
 		Dom.h2 "Settle transactions"
@@ -1048,7 +1053,7 @@ renderSettlePane = (settleO) !->
 				fontSize: '80%'
 				padding: '8px'
 				fontStyle: 'italic'
-				
+
 			if account = Db.shared.get('accounts', Plugin.userId())
 				Dom.text tr("Your account number: %1", account)
 			else
@@ -1057,7 +1062,6 @@ renderSettlePane = (settleO) !->
 				Modal.prompt tr("Your account number"), (text) !->
 					Server.sync 'account', text, !->
 						Db.shared.set 'account', Plugin.userId(), text
-								
 		settleO.iterate (tx) !->
 			Ui.item !->
 				[from,to] = tx.key().split(':')
@@ -1067,7 +1071,104 @@ renderSettlePane = (settleO) !->
 					data: 'good2'
 					color: if done&2 then '#080' else if done&1 then '#777' else '#ccc'
 					style: {marginRight: '10px'}
+				statusText = undefined
+				statusBold = false
+				confirmText = undefined
+				isTo = +to is Plugin.userId()
+				isFrom = +from is Plugin.userId()
+				# Determine status text
+				if done&2
+					statusText = tr("%1 received %2 from %3", formatName(to,true), formatMoney(amount), formatName(from))
+				else
+					if done&1
+						statusBold = isTo
+						statusText = tr("%1 paid %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
+					else
+						statusBold = isFrom || isTo
+						statusText = tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
+				# Determine action text and tap action
+				paidToggle = !->
+					log "done="+done
+					Server.sync 'settlePayed', tx.key(), !->
+						result = (done&~1) | ((done^1)&1)
+						log "paidToggle() result="+result
+						tx.set 'done', result
+				doneToggle = !->
+					log "done="+done
+					Server.sync 'settleDone', tx.key(), !->
+						result = (done&~2) | ((done^2)&2)
+						log "doneToggle() result="+result
+						tx.set 'done', result
+				confirmAdminCancel = !->
+					Dom.onTap !->
+						Modal.confirm tr("Confirm change")
+							, tr("Are you sure that you want to cancel this payment as admin? (normally %1 should do this)", formatName(to))
+							, !->
+								doneToggle()
+				confirmAdminDone = !->
+					Dom.onTap !->
+						Modal.confirm tr("Confirm change")
+							, tr("Are you sure that you want to confirm this payment as admin? (normally %1 should do this)", formatName(to))
+							, !->
+								doneToggle()
+				if !isTo and !isFrom
+					if Plugin.userIsAdmin()
+						if done&2
+							confirmText = tr("Tap to cancel this payment as admin")
+							confirmAdminCancel()
+						else
+							confirmText = tr("Tap to confirm this payment as admin")
+							confirmAdminDone()
+				else if !isTo and isFrom
+					if !(done&2)
+						if done&1 # sender confirmed
+							if Plugin.userIsAdmin()
+								confirmText = tr("Waiting for confirmation by %1. Tap to confirm as admin or cancel.", formatName(to))
+								Dom.onTap !->
+									Modal.show tr("Cancel send or confirm payment?")
+										, !->
+											Dom.text tr("Do you want to cancel that you paid or confirm that the payment is received?")
+										, (value) !->
+											if value is 'removeSend'
+												paidToggle()
+											else if value is 'confirmPay'
+												doneToggle()
+										, ['cancel', "Cancel", 'removeSend', "Remove confirmation", 'confirmPay', "Payment received"]
+							else
+								confirmText = tr("Waiting for confirmation by %1, tap to cancel.", formatName(to))
+								Dom.onTap !->
+									paidToggle()
+						else
+							if account = Db.shared.get('accounts', to)
+								confirmText = tr("Account: %1. Tap to ask for confirmation by %2.", account, formatName(to))
+							else
+								confirmText = tr("%1 has not entered account info. Tap to ask for confirmation.", formatName(to))
+							Dom.onTap !->
+								paidToggle()
+					else if Plugin.userIsAdmin()
+						confirmText = tr("Tap to cancel as admin")
+						confirmAdminCancel()
+				else if isTo and !isFrom
+					if done&2 # receiver confirmed
+						confirmText = tr("Tap to undo confirmation")
+					else
+						confirmText = tr("Tap to confirm receipt of payment")
+					Dom.onTap !->
+						doneToggle()
+				else
+					# Should never occur (incorrect settle)
 				Dom.div !->
+					Dom.span !->
+						Dom.text statusText
+						Dom.style fontWeight: if statusBold then 'bold' else ''
+					if confirmText?
+						Dom.div !->
+							Dom.style
+								fontSize: '80%'
+								fontWeight: if statusBold then 'bold' else ''
+							Dom.text confirmText
+
+				###
 					if done&2
 						Dom.text tr("%1 received %2 from %3", formatName(to,true), formatMoney(amount), formatName(from))
 					else
@@ -1078,30 +1179,33 @@ renderSettlePane = (settleO) !->
 								Dom.style
 									fontWeight: if +from is Plugin.userId() then 'bold' else ''
 								Dom.text tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
-					
+
 						Dom.div !->
 							Dom.style
 								fontSize: '80%'
 								fontWeight: if +to is Plugin.userId() then 'bold' else ''
-								
+
 							if +to is Plugin.userId()
 								Dom.text tr("Tap to confirm receipt of payment")
+							else if Plugin.userIsAdmin(+to)
+								Dom.text tr("Tap to confirm as admin")
 							else if done&1
 								Dom.text tr("Waiting for %1 to confirm payment", formatName(to))
 							else if account = Db.shared.get('accounts', to)
 								Dom.text tr("Account: %1", account)
 							else
 								Dom.text tr("%1 has not entered account info", formatName(to))
-							
+
 				if +from is Plugin.userId() and !(done&2)
 					Dom.onTap !->
 						Server.sync 'settlePayed', tx.key(), !->
 							tx.set 'done', (done&~1) | ((done^1)&1)
-					
+
 				else if +to is Plugin.userId()
 					Dom.onTap !->
 						Server.sync 'settleDone', tx.key(), !->
 							tx.set 'done', (done&~2) | ((done^2)&2)
+				###
 
 		if Plugin.userIsAdmin()
 			Dom.div !->
@@ -1111,15 +1215,15 @@ renderSettlePane = (settleO) !->
 					if !(v.done&2)
 						complete = false
 						break
-			
+
 				buttonText = if complete then tr("Finish") else tr("Cancel")
 				if complete
 					Ui.button tr("Finish"), !->
-						require('modal').confirm tr("Finish settle?"), tr("The pane will be discarded for all members"), !->
+						Modal.confirm tr("Finish settle?"), tr("The pane will be discarded for all members"), !->
 							Server.call 'settleStop'
 				else
 					Ui.button tr("Cancel"), !->
-						require('modal').confirm tr("Cancel settle?"), tr("There are uncompleted settle transactions! When someone has paid and it hasn't yet been confirmed, the balance will be inaccurate."), !->
+						Modal.confirm tr("Cancel settle?"), tr("There are uncompleted settle transactions! When someone has paid and it hasn't yet been confirmed, the balance will be inaccurate."), !->
 							Server.call 'settleStop'
 
 
@@ -1129,7 +1233,7 @@ formatMoney = (amount) ->
 	if Db.shared.get("currency")
 		currency = Db.shared.get("currency")
 	return currency+number
-	
+
 formatName = (userId, capitalize) ->
 	if +userId != Plugin.userId()
 		Plugin.userName(userId)
@@ -1137,7 +1241,7 @@ formatName = (userId, capitalize) ->
 		tr("You")
 	else
 		tr("you")
-		
+
 formatGroup = (userIds, capitalize) ->
 	if userIds.length > 3
 		userIds[0...3].map(formatName).join(', ') + ' and ' + (userIds.length-3) + ' others'
