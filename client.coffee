@@ -136,7 +136,7 @@ renderBalances = !->
 			renderItem user.key(), user.get()
 		, (user) ->
 			# Sort users with zero balance to the bottom
-			number = Db.shared.get("balances", user.key())||0
+			number = 100 * (Db.shared.get("balances", user.key())||0)
 			if number is 0
 				return 9007199254740991
 			else
