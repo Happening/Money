@@ -171,11 +171,11 @@ exports.client_settleStart = !->
 			log "negative"
 			negBalances.push([user.key(), user.peek()])
 	# Check for equal balance differences
-	i = negBalances.length
+	i = negBalances.length-1
 	settles = {}
-	while i--
-		j = posBalances.length
-		while j--
+	while i >= 0
+		j = posBalances.length-1
+		while j >= 0 and i >= 0
 			neg = negBalances[i][1]
 			pos = posBalances[j][1]
 			if -neg == pos
@@ -184,6 +184,10 @@ exports.client_settleStart = !->
 				settles[identifier] = {done: 0, amount: pos}
 				negBalances.splice(i, 1)
 				posBalances.splice(j, 1)
+				i--
+			j--
+		i--
+
 	# Create settles for the remaining balances
 	log "posBalances="+posBalances.length + ", negBalances="+negBalances.length
 	while negBalances.length > 0 and posBalances.length > 0

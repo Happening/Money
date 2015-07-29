@@ -16,6 +16,7 @@ exports.remainderDistribution = (users, remainder, transactionNumber) ->
 		usersArray.splice selected, 1
 		remaining -= toSet
 		transactionNumberOffset += 10
+		userCount--
 	log "[remainderDistribution] users=", JSON.stringify(users), "usersLeft=", usersArray, ", remainder="+remainder+", transactionNumber="+transactionNumber+", distributed="+transactionNumberOffset/10+", result="+JSON.stringify(result)
 	return result
 

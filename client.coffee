@@ -160,6 +160,8 @@ renderBalances = !->
 						Ui.button tr("Initiate settle"), !->
 							Modal.confirm tr("Initiate settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
 								Server.call 'settleStart'
+								Page.back()
+
 				else
 					Dom.div !->
 						Dom.style
@@ -168,7 +170,7 @@ renderBalances = !->
 							fontSize: '80%'
 							color: '#888'
 							fontStyle: 'italic'
-						Dom.text tr("Want to settle balances? Ask a group admin to initiate settle mode!")
+						Dom.text tr("Want to settle balances? Ask an admin to initiate settle mode!")
 
 # Render a transaction
 renderView = (txId) !->
@@ -1101,20 +1103,20 @@ renderSettlePane = (settleO) !->
 						tx.set 'done', result
 				confirmAdminCancel = !->
 					Dom.onTap !->
-						Modal.confirm tr("Confirm change")
-							, tr("Are you sure that you want to cancel this payment as admin? (normally %1 should do this)", formatName(to))
+						Modal.confirm tr("Unconfirm as admin?")
+							, tr("This will unconfirm receipt of payment by %1", formatName(to))
 							, !->
 								doneToggle()
 				confirmAdminDone = !->
 					Dom.onTap !->
-						Modal.confirm tr("Confirm change")
-							, tr("Are you sure that you want to confirm this payment as admin? (normally %1 should do this)", formatName(to))
+						Modal.confirm tr("Confirm as admin?")
+							, tr("This will confirm receipt of payment by %1", formatName(to))
 							, !->
 								doneToggle()
 				if !isTo and !isFrom
 					if Plugin.userIsAdmin()
 						if done&2
-							confirmText = tr("Tap to cancel this payment as admin")
+							confirmText = tr("Tap to unconfirm this payment as admin")
 							confirmAdminCancel()
 						else
 							confirmText = tr("Tap to confirm this payment as admin")
@@ -1123,34 +1125,34 @@ renderSettlePane = (settleO) !->
 					if !(done&2)
 						if done&1 # sender confirmed
 							if Plugin.userIsAdmin()
-								confirmText = tr("Waiting for confirmation by %1. Tap to confirm as admin or cancel.", formatName(to))
+								confirmText = tr("Waiting for confirmation by %1", formatName(to))
 								Dom.onTap !->
-									Modal.show tr("Cancel send or confirm payment?")
+									Modal.show tr("(Un)confirm payment?")
 										, !->
-											Dom.text tr("Do you want to cancel that you paid or confirm that the payment is received?")
+											Dom.text tr("Do you want to unconfirm that you paid, or (as admin) confirm receipt of payment by %1?", formatName(to))
 										, (value) !->
 											if value is 'removeSend'
 												paidToggle()
 											else if value is 'confirmPay'
 												doneToggle()
-										, ['cancel', "Cancel", 'removeSend', "Remove confirmation", 'confirmPay', "Payment received"]
+										, ['cancel', "Cancel", 'removeSend', "Unconfirm", 'confirmPay', "Confirm"]
 							else
-								confirmText = tr("Waiting for confirmation by %1, tap to cancel.", formatName(to))
+								confirmText = tr("Waiting for confirmation by %1, tap to cancel", formatName(to))
 								Dom.onTap !->
 									paidToggle()
 						else
 							if account = Db.shared.get('accounts', to)
-								confirmText = tr("Account: %1. Tap to ask for confirmation by %2.", account, formatName(to))
+								confirmText = tr("Account: %1. Tap to confirm your payment to %2.", account, formatName(to))
 							else
-								confirmText = tr("%1 has not entered account info. Tap to ask for confirmation.", formatName(to))
+								confirmText = tr("Account info missing. Tap to confirm your payment to %1.", formatName(to))
 							Dom.onTap !->
 								paidToggle()
 					else if Plugin.userIsAdmin()
-						confirmText = tr("Tap to cancel as admin")
+						confirmText = tr("Tap to unconfirm as admin")
 						confirmAdminCancel()
 				else if isTo and !isFrom
 					if done&2 # receiver confirmed
-						confirmText = tr("Tap to undo confirmation")
+						confirmText = tr("Tap to unconfirm")
 					else
 						confirmText = tr("Tap to confirm receipt of payment")
 					Dom.onTap !->
@@ -1158,14 +1160,11 @@ renderSettlePane = (settleO) !->
 				else
 					# Should never occur (incorrect settle)
 				Dom.div !->
-					Dom.span !->
-						Dom.text statusText
-						Dom.style fontWeight: if statusBold then 'bold' else ''
+					Dom.style fontWeight: (if statusBold then 'bold' else ''), Flex: true
+					Dom.text statusText
 					if confirmText?
 						Dom.div !->
-							Dom.style
-								fontSize: '80%'
-								fontWeight: if statusBold then 'bold' else ''
+							Dom.style fontSize: '80%'
 							Dom.text confirmText
 
 				###
@@ -1219,12 +1218,13 @@ renderSettlePane = (settleO) !->
 				buttonText = if complete then tr("Finish") else tr("Cancel")
 				if complete
 					Ui.button tr("Finish"), !->
-						Modal.confirm tr("Finish settle?"), tr("The pane will be discarded for all members"), !->
+						Modal.confirm tr("Finish settle?"), tr("The settle payments will be added to the list of transactions, concluding the settle"), !->
 							Server.call 'settleStop'
 				else
 					Ui.button tr("Cancel"), !->
-						Modal.confirm tr("Cancel settle?"), tr("There are uncompleted settle transactions! When someone has paid and it hasn't yet been confirmed, the balance will be inaccurate."), !->
-							Server.call 'settleStop'
+						Modal.confirm tr("Cancel settle?"), !->
+							Dom.userText tr("There are uncompleted settle transactions. Only the **confirmed payments** will be added as new transactions.")
+						, !-> Server.call 'settleStop'
 
 
 formatMoney = (amount) ->
