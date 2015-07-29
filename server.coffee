@@ -3,6 +3,7 @@ Plugin = require 'plugin'
 Event = require 'event'
 Timer = require 'timer'
 Social = require 'social'
+Shared = require 'shared'
 
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
@@ -149,31 +150,11 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
 		if lateRemainder isnt 0  # There is something left (probably because of rounding)
-			# random user gets (un)lucky
-			count = 0
-			for userId of users
-				count++
-			selected = Math.floor(randomFromSeed(txId)*count)
-			selected-- if selected is count
-			log "count="+count+", transactionNumber="+txId+", selected="+selected+", random="+randomFromSeed(txId)
-			counter = 0
-			for userId of users
-				if selected is counter
-					luckyId = userId
-				counter++
-			Db.shared.modify 'balances', luckyId, (v) ->
-				return (v||0) + (if invert then -1 else 1) *  lateRemainder
-
-			###
-			count = 0
-
-			for userId of users
-				if randomFromSeed(txId) < 1/++count
-					luckyId = userId
-			Db.shared.modify 'balances', luckyId, (v) ->
-				return (v||0) + (if invert then -1 else 1) *  lateRemainder
-			###
-			log Plugin.userName(luckyId)+" ("+luckyId+") is (un)lucky: "+lateRemainder
+			distribution = Shared.remainderDistribution users, lateRemainder, txId
+			for userId, amount of distribution
+				Db.shared.modify 'balances', userId, (v) ->
+					return (v||0) + (if invert then -1 else 1) * (amount/100)
+			log "Lucky/unlucky distribution: "+JSON.stringify(distribution)
 
 # Start a settle for all balances
 exports.client_settleStart = !->
@@ -369,8 +350,3 @@ importFromV1 = !->
 		balanceAmong total, byData, id, false
 		log "forData balanceAmong:"
 		balanceAmong total, forData, id, true
-
-# duplicated in client.coffee
-randomFromSeed = (seed) ->
-	x = Math.sin(seed) * 10000
-	return x-Math.floor(x)

@@ -12,11 +12,7 @@ Ui = require 'ui'
 Social = require 'social'
 Time = require 'time'
 Event = require 'event'
-
-# duplicated in client.coffee
-randomFromSeed = (seed) ->
-	x = Math.sin(seed) * 10000
-	x-Math.floor(x)
+Shared = require 'shared'
 
 exports.render = ->
 	#log "Plugin.api() = "+Plugin.api()
@@ -143,7 +139,7 @@ renderBalances = !->
 				return 9007199254740991
 			else
 				return number
-		
+
 		settleO = Db.shared.ref('settle')
 		if !settleO.isHash()
 			total = Obs.create 0
@@ -243,8 +239,14 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 	remainder = Obs.create(total)
 	lateRemainder = Obs.create(total)
 	totalShare = Obs.create(0)
+	usersList = Obs.create {}
+	distribution = Obs.create {}
 	Obs.observe !->
 		path.iterate (user) !->
+			userKey = user.key()
+			usersList.set userKey, true
+			Obs.onClean !->
+				usersList.remove userKey
 			if (user.get()+"") is "true"
 				totalShare.modify((v) -> v+100)
 				Obs.onClean !->
@@ -255,6 +257,8 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 				totalShare.modify((v) -> v+percent)
 				Obs.onClean !->
 					totalShare.modify((v) -> v-percent)
+	Obs.observe !->
+		distribution.set Shared.remainderDistribution(usersList.peek(), lateRemainder.get(), transactionNumber)
 	Obs.observe !->
 		#log "totalShare="+totalShare.peek()+", totalO="+total+", remainder="+remainder.peek()
 		path.iterate (user) !->
@@ -282,7 +286,6 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 				Obs.onClean !->
 					remainder.modify((v) -> v+number)
 					lateRemainder.modify((v) -> v+number)
-			# TODO: Assign possibly remaining part of the total to someone
 			Ui.item !->
 				Ui.avatar Plugin.userAvatar(user.key()),
 					onTap: (!-> Plugin.userInfo(user.key()))
@@ -293,21 +296,7 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 				Dom.div !->
 					Dom.style textAlign: 'right'
 					Dom.div !->
-						count = 0
-						value = number
-						for userId, dummy of path.peek()
-							count++
-						selected = Math.floor(randomFromSeed(transactionNumber)*count)
-						selected-- if selected is count
-						#log "count="+count+", transactionNumber="+transactionNumber+", selected="+selected+", random="+randomFromSeed(transactionNumber)
-						counter = 0
-						for userId, dummy of path.peek()
-							if selected is counter
-								luckyId = userId
-							counter++
-						if (luckyId+"") is (user.key()+"")
-							value += lateRemainder.get()
-						Dom.text formatMoney(value)
+						Dom.text formatMoney(number+(distribution.get(user.key())||0)/100)
 					if suffix isnt undefined
 						Dom.div !->
 							Dom.style fontSize: '80%'
@@ -315,7 +304,7 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 		, (amount) ->
 			# Sort static on top, then percentage, then remainder
 			return getSortValue(amount.get())
-			
+
 # Render a transaction edit page
 renderEditOrNew = (editId) !->
 	if editId
@@ -323,7 +312,7 @@ renderEditOrNew = (editId) !->
 		if !edit.isHash()
 			Ui.emptyText tr("No such transaction")
 			return
-			
+
 		Page.setTitle "Edit transaction"
 	else
 		Page.setTitle "New transaction"
@@ -501,8 +490,6 @@ renderEditOrNew = (editId) !->
 							suffix = undefined
 							if amount
 								number = +amount
-							# TODO: Assign possibly remaining part of the total to someone
-
 							Dom.div !-> # Aligning div
 								Dom.style
 									display: 'inline-block'
@@ -674,7 +661,13 @@ renderEditOrNew = (editId) !->
 			handleChange forO.get()
 			#log "forO form updated"
 		# Setup totalshare
-		totalShare = Obs.create(0)
+		totalShare = Obs.create 0
+		usersList = Obs.create {}
+		distribution = Obs.create {}
+		Obs.observe !->
+			transactionNumber = (Db.shared.get('transactionId')||0)+1
+			transactionNumber = editId if editId
+			distribution.set Shared.remainderDistribution(usersList.peek(), lateRemainder.get(), transactionNumber)
 		# Select/deselect all button
 		Obs.observe !->
 			users = Plugin.users.count().get()
@@ -708,6 +701,9 @@ renderEditOrNew = (editId) !->
 					suffix = undefined
 					Obs.observe !->
 						if amount
+							usersList.set user.key(), true
+							Obs.onClean !->
+								usersList.remove user.key()
 							if (amount+"") is "true"
 								totalShare.modify((v) -> v+100)
 								Obs.onClean !->
@@ -740,7 +736,6 @@ renderEditOrNew = (editId) !->
 										remainder.modify((v) -> v+number.get())
 										lateRemainder.modify((v) -> v+number.get())
 								suffix = "fixed"
-					# TODO: Assign possibly remaining part of the total to someone (only for show, server handles balances correctly)
 					Dom.div !-> # Aligning div
 						Dom.style
 							display: 'inline-block'
@@ -946,23 +941,7 @@ renderEditOrNew = (editId) !->
 										Dom.style Box: 'horizontal'
 										Dom.div !->
 											Dom.style Flex: true
-											value = number.get()
-											transactionNumber = (Db.shared.get('transactionId')||0)+1
-											transactionNumber = editId if editId
-											count = 0
-											for userId, dummy of forO.peek()
-												count++
-											selected = Math.floor(randomFromSeed(transactionNumber)*count)
-											selected-- if selected is count
-											#log "count="+count+", transactionNumber="+transactionNumber+", selected="+selected+", random="+randomFromSeed(transactionNumber)
-											counter = 0
-											for userId, dummy of forO.peek()
-												if selected is counter
-													luckyId = userId
-												counter++
-											if (luckyId+"") is (user.key()+"")
-												value += lateRemainder.get()
-											Dom.text formatMoney(value)
+											Dom.text formatMoney(number.get()+(distribution.get(user.key())||0)/100)
 											Dom.style
 												fontWeight: 'normal'
 												fontSize: '90%'
@@ -1254,19 +1233,8 @@ calculateShare = (transaction, id) ->
 					log 'result for userId '+userId+' : '+result
 
 			if lateRemainder isnt 0  # There is something left (probably because of rounding)
-				# random user gets (un)lucky
-				count = 0
-				for userId, dummy of section.peek()
-					count++
-				selected = Math.floor(randomFromSeed(transaction.key())*count)
-				selected-- if selected is count
-				counter = 0
-				for userId, dummy of section.peek()
-					if selected is counter
-						luckyId = userId
-					counter++
-				if (luckyId+"") is (id+"")
-					result += lateRemainder
+				distribution = Shared.remainderDistribution section.peek(), lateRemainder, transaction.key()
+				result += (distribution[id]||0)/100
 
 		return result
 	byAmount = calculatePart(transaction.ref('by'), transaction.get('total'), id)
@@ -1283,7 +1251,7 @@ stylePositiveNegative = (amount) !->
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
-		
+
 Dom.css
 	'.selected:not(.tap)':
 		background: '#f0f0f0'
