@@ -17,7 +17,7 @@ exports.remainderDistribution = (users, remainder, transactionNumber) ->
 		remaining -= toSet
 		transactionNumberOffset += 10
 		userCount--
-	log "[remainderDistribution] users=", JSON.stringify(users), "usersLeft=", usersArray, ", remainder="+remainder+", transactionNumber="+transactionNumber+", distributed="+transactionNumberOffset/10+", result="+JSON.stringify(result)
+	#log "[remainderDistribution] users=", JSON.stringify(users), "usersLeft=", usersArray, ", remainder="+remainder+", transactionNumber="+transactionNumber+", distributed="+transactionNumberOffset/10+", result="+JSON.stringify(result)
 	return result
 
 # Pseudo-random number from a seed

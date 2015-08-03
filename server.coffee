@@ -114,7 +114,7 @@ exports.client_removeTransaction = (id) !->
 
 # Process a transaction and update balances
 balanceAmong = (total, users, txId = 99, invert) !->
-	log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
+	# log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
 	divide = []
 	remainder = total
 	totalShare = 0
@@ -132,7 +132,7 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			remainder -= number
 			old = Db.shared.peek('balances', userId)
 			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) * number
-			log "userId="+userId+", total="+total+", old="+old+", balance+="+number+", new="+newValue
+			# log "userId="+userId+", total="+total+", old="+old+", balance+="+number+", new="+newValue
 	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder
 	if remainder isnt 0 and divide.length > 0
 		lateRemainder = remainder
@@ -146,7 +146,7 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			lateRemainder -= amount
 			old = Db.shared.peek('balances', userId)
 			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) *  amount
-			log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
+			#log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
 			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
 		#log "lateRemainder="+lateRemainder
 		if lateRemainder isnt 0  # There is something left (probably because of rounding)
@@ -154,7 +154,7 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			for userId, amount of distribution
 				Db.shared.modify 'balances', userId, (v) ->
 					return (v||0) + (if invert then -1 else 1) * (amount/100)
-			log "Lucky/unlucky distribution: "+JSON.stringify(distribution)
+			#log "Lucky/unlucky distribution: "+JSON.stringify(distribution)
 
 # Start a settle for all balances
 exports.client_settleStart = !->
@@ -339,15 +339,23 @@ importFromV1 = !->
 	Db.shared.iterate (key) !->
 		key.remove()
 	Db.shared.set "balances", "V2"
+	start = Date.now()
 	Db.backend.iterate "v1backup", "transactions", (transaction) !->
+		log 'transaction', Date.now() - start, transaction.key()
+
+		cents = transaction.peek("cents")
+		if !cents? || cents > 99999999 || cents < -99999999
+			log 'skip! cents=', cents
+			return
+
 		old = Db.shared.peek('transactionId')
 		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-		log "old transaction: "+transaction.key()+", key from="+old+", to="+id
-		#Db.shared.set "transactions", id, id+"-hi"
+		#log "old transaction: "+transaction.key()+", key from="+old+", to="+id
 		Db.shared.set "transactions", id, "creatorId", transaction.peek("creatorId")
 		Db.shared.set "transactions", id, "text", transaction.peek("description")
 		Db.shared.set "transactions", id, "created", transaction.peek("time")
-		total = (transaction.peek("cents")/100.0)
+
+		total = cents*.01
 		Db.shared.set "transactions", id, "total", total
 		forData = {}
 		transaction.iterate "borrowers", (user) !->
@@ -356,7 +364,7 @@ importFromV1 = !->
 		byData = {}
 		byData[transaction.peek("lenderId")] = total
 		Db.shared.set "transactions", id, "by", byData
-		log "byData balanceAmong:"
+		#log "byData balanceAmong:"
 		balanceAmong total, byData, id, false
-		log "forData balanceAmong:"
+		#log "forData balanceAmong:"
 		balanceAmong total, forData, id, true
