@@ -143,7 +143,7 @@ renderBalances = !->
 				return number
 		Plugin.users.iterate (user) !->
 			if !(Db.shared.get("balances", user.key())?)
-				renderItem user.key(), Db.shared.get "balances", user.key()
+				renderItem user.key(), 0
 
 		settleO = Db.shared.ref('settle')
 		if !settleO.isHash()

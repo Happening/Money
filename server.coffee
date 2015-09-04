@@ -8,16 +8,7 @@ Shared = require 'shared'
 exports.onUpgrade = ->
 	log '[onUpgrade()] at '+new Date()
 
-	#restoreFromV1()
-	#return
-
-	if not(Db.shared.isHash("balances"))
-		log "is old version"
-		importFromV1()
-	return
-
 exports.onInstall = (config = {}) ->
-	Db.shared.set "balances", "V2"
 	onConfig(config)
 
 exports.onConfig = onConfig = (config) ->
@@ -326,45 +317,3 @@ formatMoney = (amount) ->
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
-
-restoreFromV1 = !->
-	log "Restoring database of old version"
-	Db.shared.iterate (key) !->
-		key.remove()
-	Db.shared.set Db.backend.peek('v1backup')
-
-importFromV1 = !->
-	log "Converting database of old version to new"
-	Db.backend.set 'v1backup', Db.shared.peek()
-	Db.shared.iterate (key) !->
-		key.remove()
-	Db.shared.set "balances", "V2"
-	start = Date.now()
-	Db.backend.iterate "v1backup", "transactions", (transaction) !->
-		log 'transaction', Date.now() - start, transaction.key()
-
-		cents = transaction.peek("cents")
-		if !cents? || cents > 99999999 || cents < -99999999
-			log 'skip! cents=', cents
-			return
-
-		old = Db.shared.peek('transactionId')
-		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-		#log "old transaction: "+transaction.key()+", key from="+old+", to="+id
-		Db.shared.set "transactions", id, "creatorId", transaction.peek("creatorId")
-		Db.shared.set "transactions", id, "text", transaction.peek("description")
-		Db.shared.set "transactions", id, "created", transaction.peek("time")
-
-		total = cents*.01
-		Db.shared.set "transactions", id, "total", total
-		forData = {}
-		transaction.iterate "borrowers", (user) !->
-			forData[user.key()] = true
-		Db.shared.set "transactions", id, "for", forData
-		byData = {}
-		byData[transaction.peek("lenderId")] = total
-		Db.shared.set "transactions", id, "by", byData
-		#log "byData balanceAmong:"
-		balanceAmong total, byData, id, false
-		#log "forData balanceAmong:"
-		balanceAmong total, forData, id, true
