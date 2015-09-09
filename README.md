@@ -1,6 +1,6 @@
-Example
-=======
-An example Group App for Happening.
+SplitTheBill
+============
+Keep track of who owes money to whom. The SpitTheBill Group App as it can be found in the store.
 
 What's Happening?
 -----------------
