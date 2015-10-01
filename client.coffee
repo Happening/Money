@@ -64,6 +64,22 @@ exports.render = ->
 	settleO = Db.shared.ref('settle')
 	if settleO.isHash()
 		renderSettlePane(settleO)
+	else
+		total = getTotalBalance()
+		Obs.observe !->
+			if Math.round(total.get()*100) isnt 0
+				Dom.section !->
+					Dom.style padding: '16px'
+					Dom.div !->
+						Dom.style color: Plugin.colors().highlight
+						Dom.text tr("Settle balances")
+					Dom.div !->
+						Dom.style fontSize: '80%', fontWeight: "normal", marginTop: '3px'
+						Dom.text tr("Ask people to pay their debts")
+					Dom.onTap !->
+						Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
+							Server.call 'settleStart'
+
 
 	Ui.list !->
 		# Add new transaction
@@ -116,7 +132,7 @@ exports.render = ->
 			, (tx) -> -tx.key()
 
 renderBalances = !->
-	Page.setTitle "All balances"
+	Page.setTitle tr("All balances")
 	Ui.list !->
 		Dom.h2 tr("Balances")
 		renderItem = (userId, balance) !->
@@ -147,30 +163,15 @@ renderBalances = !->
 
 		settleO = Db.shared.ref('settle')
 		if !settleO.isHash()
-			total = Obs.create 0
-			Db.shared.iterate "balances", (user) !->
-				value = user.get()
-				total.modify((v) -> (v||0)+Math.abs(value))
-				Obs.onClean !->
-					total.modify((v) -> (v||0)-Math.abs(value))
-			if total.get() isnt 0
-				if Plugin.userIsAdmin()
+			total = getTotalBalance()
+			Obs.observe !->
+				if Math.round(total.get()*100) isnt 0
 					Dom.div !->
 						Dom.style textAlign: 'right'
-						Ui.button tr("Initiate settle"), !->
-							Modal.confirm tr("Initiate settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
+						Ui.button tr("Settle"), !->
+							Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
 								Server.call 'settleStart'
 								Page.back()
-
-				else
-					Dom.div !->
-						Dom.style
-							textAlign: 'center'
-							margin: '4px 0'
-							fontSize: '80%'
-							color: '#888'
-							fontStyle: 'italic'
-						Dom.text tr("Want to settle balances? Ask an admin to initiate settle mode!")
 
 # Render a transaction
 renderView = (txId) !->
@@ -638,7 +639,7 @@ renderEditOrNew = (editId) !->
 						fontSize: "80%"
 						padding: "7px"
 						margin: "0 0 -8px 0"
-					Dom.text "Add multiple users"
+					Dom.text tr("Add other(s)")
 					Dom.onTap !->
 						multiplePaidBy.set(true)
 
@@ -1045,7 +1046,7 @@ getSortValue = (key) ->
 
 renderSettlePane = (settleO) !->
 	Ui.list !->
-		Dom.h2 "Settle transactions"
+		Dom.h2 tr("Settle")
 		Dom.div !->
 			Dom.style
 				Flex: true
@@ -1142,11 +1143,16 @@ renderSettlePane = (settleO) !->
 									paidToggle()
 						else
 							if account = Db.shared.get('accounts', to)
-								confirmText = tr("Account: %1. Tap to confirm your payment to %2.", account, formatName(to))
+								accountTxt = if !!Form.clipboard and Form.clipboard() then tr("%1 (long press to copy)", account) else tr("%1", account)
+								confirmText = tr("Account: %1. Tap to confirm your payment to %2.", accountTxt, formatName(to))
 							else
 								confirmText = tr("Account info missing. Tap to confirm your payment to %1.", formatName(to))
-							Dom.onTap !->
-								paidToggle()
+							Dom.onTap
+								cb: !-> paidToggle()
+								longTap: !->
+									if account and !!Form.clipboard and (clipboard = Form.clipboard())
+										clipboard(account)
+										require('toast').show tr("Account copied to clipboard")
 					else if Plugin.userIsAdmin()
 						confirmText = tr("Tap to unconfirm as admin")
 						confirmAdminCancel()
@@ -1206,24 +1212,27 @@ renderSettlePane = (settleO) !->
 							tx.set 'done', (done&~2) | ((done^2)&2)
 				###
 
-		if Plugin.userIsAdmin()
-			Dom.div !->
-				Dom.style textAlign: 'right'
-				complete = true
-				for k,v of settleO.get()
-					if !(v.done&2)
-						complete = false
-						break
+		Dom.div !->
+			Dom.style textAlign: 'right'
+			complete = true
+			sentButNotReceived = false
+			for k,v of settleO.get()
+				if v.done&1 and !(v.done&2)
+					sentButNotReceived = true
+				if !(v.done&2)
+					complete = false
 
-				buttonText = if complete then tr("Finish") else tr("Cancel")
-				if complete
-					Ui.button tr("Finish"), !->
-						Modal.confirm tr("Finish settle?"), tr("The settle payments will be added to the list of transactions, concluding the settle"), !->
-							Server.call 'settleStop'
-				else
-					Ui.button tr("Cancel"), !->
-						Modal.confirm tr("Cancel settle?"), !->
-							Dom.userText tr("There are uncompleted settle transactions. Only the **confirmed payments** will be added as new transactions.")
+			if complete
+				Ui.button tr("Finish"), !->
+					Modal.confirm tr("Finish settle?"), tr("The settle payments will be added to the list of transactions, concluding the settle"), !->
+						Server.call 'settleStop'
+			else if Plugin.userIsAdmin() # serverside this case will not be checked, ah well --Jelmer
+				Ui.button tr("Postpone"), !->
+					if sentButNotReceived
+						Modal.show tr("Postpone not allowed"), tr("Please (un)confirm receipt of sent payments (dark gray checkmarks) before postponing the settle")
+					else
+						Modal.confirm tr("Postpone settle?"), !->
+							Dom.userText tr("Payments that have been confirmed by the receiver will be saved")
 						, !-> Server.call 'settleStop'
 
 
@@ -1355,6 +1364,15 @@ stylePositiveNegative = (amount) !->
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
+
+getTotalBalance = ->
+	total = Obs.create 0
+	Db.shared.iterate "balances", (user) !->
+		value = user.get()
+		total.modify((v) -> (v||0)+Math.abs(value))
+		Obs.onClean !->
+			total.modify((v) -> (v||0)-Math.abs(value))
+	total
 
 Dom.css
 	'.selected:not(.tap)':

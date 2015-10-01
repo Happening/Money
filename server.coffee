@@ -5,13 +5,13 @@ Timer = require 'timer'
 Social = require 'social'
 Shared = require 'shared'
 
-exports.onUpgrade = ->
+exports.onUpgrade = !->
 	log '[onUpgrade()] at '+new Date()
 
-exports.onInstall = (config = {}) ->
+exports.onInstall = (config = {}) !->
 	onConfig(config)
 
-exports.onConfig = onConfig = (config) ->
+exports.onConfig = onConfig = (config) !->
 	if config.currency
 		result = config.currency
 		if result.length is 0
@@ -149,7 +149,6 @@ balanceAmong = (total, users, txId = 99, invert) !->
 
 # Start a settle for all balances
 exports.client_settleStart = !->
-	Plugin.assertAdmin()
 	# Generate required settle transactions
 	negBalances = []
 	posBalances = []
@@ -240,7 +239,6 @@ exports.settleRemind = (args) ->
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
-	Plugin.assertAdmin()
 	allDone = false
 	members = []
 	Db.shared.iterate "settle", (settle) !->
