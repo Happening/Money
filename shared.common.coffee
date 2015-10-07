@@ -1,12 +1,12 @@
 # Distribute cents to users deterministically
 exports.remainderDistribution = (users, remainder, transactionNumber) ->
 	result = {}
-	remaining = Math.round(remainder*100)
+	remaining = remainder
 	usersArray = []
 	for user, dummy of users
 		usersArray.push user
 	userCount = usersArray.length
-	return {} if remaining > userCount or remaining is 0
+	return {} if remaining > userCount or remaining is 0 or remaining < -userCount
 	transactionNumberOffset = 0
 	while remaining isnt 0
 		selected = Math.floor(randomFromSeed(transactionNumber)*userCount)

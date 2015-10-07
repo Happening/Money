@@ -7,6 +7,21 @@ Shared = require 'shared'
 
 exports.onUpgrade = !->
 	log '[onUpgrade()] at '+new Date()
+	if (Db.shared.get("version")||0) < 1
+		log "Upgrading: Floats to integers"
+		convert = (number) ->
+			return Math.round((number||0)*100)
+		Db.shared.set "version", 1
+		Db.shared.iterate "balances" , (userBalance) !->
+			userBalance.modify (balance) -> convert(balance)
+		Db.shared.iterate "transactions", (transaction) !->
+			transaction.modify "total", (total) -> convert(total)
+			transaction.iterate "by", (byLine) !->
+				byLine.modify (byAmount) -> convert(byAmount)
+			transaction.iterate "for", (forLine) !->
+				if (forLine.get()+"").substr(-1) isnt "%" and (forLine.get()+"") isnt "true"
+					forLine.modify (forAmount) -> convert(forAmount)
+		log "Upgrade complete: Floats to integers"
 
 exports.onInstall = (config = {}) !->
 	onConfig(config)
@@ -29,7 +44,6 @@ exports.client_transaction = (id, data) !->
 	newBy = {}
 	total = 0
 	for userId, share of data.by
-		log "userId="+userId+", share="+share
 		if (not isNaN(+share)) and +share isnt 0
 			newBy[userId] = share
 			total += (+share)
@@ -69,7 +83,6 @@ exports.client_transaction = (id, data) !->
 			include: members
 			sender: Plugin.userId()
 	else
-		# TODO: specify what has been changed?
 		Event.create
 			unit: "transaction"
 			text: Plugin.userName()+" edited transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
@@ -95,7 +108,6 @@ exports.client_transaction = (id, data) !->
 
 # Delete a transaction
 exports.client_removeTransaction = (id) !->
-	# TODO: Only by admin? Only by creator?
 	transaction = Db.shared.ref("transactions", id)
 	# Undo transaction balance changes
 	balanceAmong transaction.peek("total"), transaction.peek("by"), id, true
@@ -105,7 +117,6 @@ exports.client_removeTransaction = (id) !->
 
 # Process a transaction and update balances
 balanceAmong = (total, users, txId = 99, invert) !->
-	# log "balanceAmong: total="+total+", users="+JSON.stringify(users)+", txId="+txId
 	divide = []
 	remainder = total
 	totalShare = 0
@@ -119,12 +130,10 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			divide.push userId
 			totalShare += 100
 		else
-			number = Math.round(+amount*100.0)/100.0
+			number = Math.round(+amount)
 			remainder -= number
 			old = Db.shared.peek('balances', userId)
 			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) * number
-			# log "userId="+userId+", total="+total+", old="+old+", balance+="+number+", new="+newValue
-	#log "total="+total+", totalShare="+totalShare+", remainder="+remainder
 	if remainder isnt 0 and divide.length > 0
 		lateRemainder = remainder
 		while userId = divide.pop()
@@ -133,19 +142,15 @@ balanceAmong = (total, users, txId = 99, invert) !->
 			if (raw+"").substr(-1) is "%"
 				raw = raw+""
 				percent = +(raw.substring(0, raw.length-1))
-			amount = Math.round((remainder*100.0)/totalShare*percent)/100.0
+			amount = Math.round((remainder)/totalShare*percent)
 			lateRemainder -= amount
 			old = Db.shared.peek('balances', userId)
 			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) *  amount
-			#log "userId="+userId+", total="+total+", old="+old+", balance+="+amount+", new="+newValue
-			#log "amount="+amount+", remainder="+remainder+", totalShare="+totalShare+", percent="+percent+", lateRemainder="+lateRemainder
-		#log "lateRemainder="+lateRemainder
 		if lateRemainder isnt 0  # There is something left (probably because of rounding)
 			distribution = Shared.remainderDistribution users, lateRemainder, txId
 			for userId, amount of distribution
 				Db.shared.modify 'balances', userId, (v) ->
-					return (v||0) + (if invert then -1 else 1) * (amount/100)
-			#log "Lucky/unlucky distribution: "+JSON.stringify(distribution)
+					return (v||0) + (if invert then -1 else 1) * amount
 
 # Start a settle for all balances
 exports.client_settleStart = !->
@@ -153,12 +158,9 @@ exports.client_settleStart = !->
 	negBalances = []
 	posBalances = []
 	Db.shared.iterate "balances", (user) !->
-		log "user="+user.key()+", balance="+user.peek()
 		if user.peek() > 0
-			log "positive"
 			posBalances.push([user.key(), user.peek()])
 		else if user.peek() < 0
-			log "negative"
 			negBalances.push([user.key(), user.peek()])
 	# Check for equal balance differences
 	i = negBalances.length-1
@@ -169,7 +171,6 @@ exports.client_settleStart = !->
 			neg = negBalances[i][1]
 			pos = posBalances[j][1]
 			if -neg == pos
-				log "found the same"
 				identifier = negBalances[i][0] + ":" + posBalances[j][0]
 				settles[identifier] = {done: 0, amount: pos}
 				negBalances.splice(i, 1)
@@ -179,9 +180,7 @@ exports.client_settleStart = !->
 		i--
 
 	# Create settles for the remaining balances
-	log "posBalances="+posBalances.length + ", negBalances="+negBalances.length
 	while negBalances.length > 0 and posBalances.length > 0
-		log "found transaction"
 		identifier = negBalances[0][0] + ":" + posBalances[0][0]
 		amount = Math.min(Math.abs(negBalances[0][1]), posBalances[0][1])
 		settles[identifier] = {done: 0, amount: amount}
@@ -307,11 +306,16 @@ exports.client_account = (text) !->
 	Db.shared.set 'accounts', Plugin.userId(), text
 
 formatMoney = (amount) ->
-	number = amount.toFixed(2)
+	amount = Math.round(amount)
 	currency = "€"
 	if Db.shared.get("currency")
 		currency = Db.shared.get("currency")
-	return currency+number
+	string = amount/100
+	if amount%100 is 0
+		string +=".00"
+	else if amount%10 is 0
+		string += "0"
+	return currency+(string)
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
