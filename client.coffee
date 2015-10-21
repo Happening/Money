@@ -13,17 +13,18 @@ Social = require 'social'
 Time = require 'time'
 Event = require 'event'
 Shared = require 'shared'
+Toast = require 'toast'
 
 balances = Obs.create {}
 
 exports.render = ->
+
 	req0 = Page.state.get(0)
 	if req0 is 'new'
 		renderEditOrNew()
 		return
 	if req0 is 'balances'
-		Obs.observe !->
-			calculateBalances()
+		calculateBalances()
 		renderBalances()
 		return
 	if +req0 and Page.state.get(1) is 'edit'
@@ -32,8 +33,7 @@ exports.render = ->
 	if +req0
 		renderView +req0
 		return
-	Obs.observe !->
-		calculateBalances()
+	calculateBalances()
 	renderHome()
 
 renderHome = !->
@@ -165,9 +165,8 @@ renderBalances = !->
 
 		settleO = Db.shared.ref('settle')
 		if !settleO.isHash()
-			total = getTotalBalance()
 			Obs.observe !->
-				if total.get() isnt 0
+				if getTotalBalance() isnt 0
 					Dom.div !->
 						Dom.style textAlign: 'right'
 						Ui.button tr("Settle"), !->
@@ -1025,14 +1024,52 @@ renderSettlePane = (settleO) !->
 				padding: '8px'
 				fontStyle: 'italic'
 
+			infoRequired = false
 			if account = Db.shared.get('accounts', Plugin.userId())
 				Dom.text tr("Your account number: %1", account)
 			else
+				infoRequired = true
 				Dom.text tr("Tap to setup your account number")
+			Dom.br()
+			if name = Db.shared.get("accountNames", Plugin.userId())
+				Dom.text tr("Your account holder name: %1", name)
+			else
+				infoRequired = true
+				Dom.text tr("Account holder missing")
+			if infoRequired
+				Dom.style
+					fontWeight: "bold"
+					fontStyle: "normal"
+					backgroundColor: "#E41B1B"
 			Dom.onTap !->
-				Modal.prompt tr("Your account number"), (text) !->
-					Server.sync 'account', text, !->
-						Db.shared.set 'account', Plugin.userId(), text
+				account = undefined
+				name = undefined
+				Modal.show tr("Enter account information"), !->
+					Dom.div !->
+						Dom.style
+							margin: "0 0 -10 0"
+						Dom.text "Account number"
+					account = Form.input
+						name: 'account'
+						type: 'text'
+					account.value (if (currentAccount = Db.shared.get("accounts", Plugin.userId()))? then currentAccount else "")
+					Dom.div !->
+						Dom.style
+							margin: "0 0 -10 0"
+						Dom.text "Account holder"
+					name = Form.input
+						name: 'name'
+						type: 'text'
+					name.value (if (currentName = Db.shared.get("accountNames", Plugin.userId()))? then currentName else Plugin.userName())
+				, (value) !->
+					if value and value is 'confirm'
+						accountV = account.value()
+						nameV = name.value()
+						Server.sync "account", accountV, nameV, !->
+							Db.shared.set "accounts", Plugin.userId(), accountV
+							Db.shared.set "accountNames", Plugin.userId(), nameV
+						Toast.show "Account and name set"
+				, ['cancel', "Cancel", 'confirm', "Confirm"]
 		settleO.iterate (tx) !->
 			Ui.item !->
 				[from,to] = tx.key().split(':')
@@ -1056,8 +1093,16 @@ renderSettlePane = (settleO) !->
 					statusText = tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
 				# Determine action text and tap action
 				paidToggle = !->
-					Server.sync 'settlePayed', tx.key(), !->
-						tx.modify 'done', (v) -> !v
+					toggle = !->
+						Server.sync 'settlePayed', tx.key(), !->
+							tx.modify 'done', (v) -> !v
+					if tx.get("done")
+						toggle()
+					else
+						Modal.confirm tr("Confirm payment?"), tr("Are you sure that you want to confirm? This will notify "+Plugin.userName(to))
+							, !->
+								toggle()
+
 				doneConfirm = !->
 					Server.sync 'settleDone', tx.key(), !->
 						[from,to] = tx.key().split(':')
@@ -1106,7 +1151,8 @@ renderSettlePane = (settleO) !->
 					else
 						if account = Db.shared.get('accounts', to)
 							accountTxt = if !!Form.clipboard and Form.clipboard() then tr("%1 (long press to copy)", account) else tr("%1", account)
-							confirmText = tr("Account: %1. Tap to confirm your payment to %2.", accountTxt, formatName(to))
+							holderTxt = if (holder = Db.shared.get("accountNames", to))? then ", holder: "+holder else ""
+							confirmText = tr("Account: %1%2. Tap to confirm your payment to %3.", accountTxt, holderTxt, formatName(to))
 						else
 							confirmText = tr("Account info missing. Tap to confirm your payment to %1.", formatName(to))
 						Dom.onTap

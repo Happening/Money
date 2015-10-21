@@ -57,6 +57,8 @@ exports.onUpgrade = !->
 					line.modify (v) -> convert(v)
 				log "U2: multiplied settle transaction by 100, id="+transaction.key()+", oldTotal="+oldTotal
 
+		Db.shared.remove "balances"
+
 
 exports.onInstall = (config = {}) !->
 	onConfig(config)
@@ -280,8 +282,9 @@ exports.client_settleDone = (key) !->
 	Db.shared.remove "settle", key
 
 # Set account of a user
-exports.client_account = (text) !->
-	Db.shared.set 'accounts', Plugin.userId(), text
+exports.client_account = (number, name) !->
+	Db.shared.set "accounts", Plugin.userId(), number
+	Db.shared.set "accountNames", Plugin.userId(), name
 
 formatMoney = (amount) ->
 	amount = Math.round(amount)
