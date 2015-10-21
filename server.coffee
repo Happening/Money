@@ -7,21 +7,56 @@ Shared = require 'shared'
 
 exports.onUpgrade = !->
 	log '[onUpgrade()] at '+new Date()
-	if (Db.shared.get("version")||0) < 1
-		log "Upgrading: Floats to integers"
+	if (Db.shared.get("version")||0) < 2
+		log "Upgrading: settle float to int fix and balance changes (marked as U2)"
+		Db.shared.set "version", 2
+
+		isFloat = (number) ->
+			return number % 1 isnt 0
 		convert = (number) ->
-			return Math.round((number||0)*100)
-		Db.shared.set "version", 1
-		Db.shared.iterate "balances" , (userBalance) !->
-			userBalance.modify (balance) -> convert(balance)
+			Math.round((number||0)*100)
+		if Db.shared.isHash("settle")
+			# Fix float settles
+			hasFloats = false
+			Db.shared.iterate "settle", (settle) !->
+				hasFloats = hasFloats || isFloat((settle.get("amount")||0))
+			if hasFloats
+				Db.shared.iterate "settle", (settle) !->
+					log "U2: Settle amount upgraded to integer: oldAmount="+settle.get("amount")
+					settle.modify "amount", (v) -> convert(v)
+
+			# Handle confirmed transactions
+			Db.shared.iterate "settle", (settle) !->
+				done = settle.get("done")
+				if done is 2 or done is 3
+					[from,to] = settle.key().split(':')
+					id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+					transaction = {}
+					forData = {}
+					forData[to] = settle.peek("amount")
+					byData = {}
+					byData[from] = settle.peek("amount")
+					transaction["creatorId"] = -1
+					transaction["for"] = forData
+					transaction["by"] = byData
+					transaction["type"] = "settle"
+					transaction["total"] = settle.peek("amount")
+					transaction["created"] = (new Date()/1000)
+					Db.shared.set 'transactions', id, transaction
+					log "U2: added transaction for settle: "+settle.key()+", amount="+settle.peek("amount")
+					Db.shared.remove "settle", settle.key()
+		# Transaction added by corrupt settle
 		Db.shared.iterate "transactions", (transaction) !->
-			transaction.modify "total", (total) -> convert(total)
-			transaction.iterate "by", (byLine) !->
-				byLine.modify (byAmount) -> convert(byAmount)
-			transaction.iterate "for", (forLine) !->
-				if (forLine.get()+"").substr(-1) isnt "%" and (forLine.get()+"") isnt "true"
-					forLine.modify (forAmount) -> convert(forAmount)
-		log "Upgrade complete: Floats to integers"
+			if transaction.get("type") is "settle" and isFloat(transaction.get("total"))
+				# Is an incorrect transaction, do *100
+				oldTotal = transaction.get("total")
+				transaction.modify "total", (v) -> convert(v)
+				transaction.iterate "for", (line) !->
+					line.modify (v) -> convert(v)
+				transaction.iterate "by", (line) !->
+					line.modify (v) -> convert(v)
+				log "U2: multiplied settle transaction by 100, id="+transaction.key()+", oldTotal="+oldTotal
+
 
 exports.onInstall = (config = {}) !->
 	onConfig(config)
@@ -52,24 +87,16 @@ exports.client_transaction = (id, data) !->
 		log "[transaction()] WARNING: total does not match the by section, total="+data.total+" byTotal="+total
 		return
 
-	isNew = false
-	if !id
+	if (isNew = !id)
 		id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-		isNew = true
 		data["created"] = (new Date())/1000
 	else
-		# Undo previous data on balance
-		prevData = Db.shared.get 'transactions', id
-		balanceAmong prevData.total, prevData.by, id, true
-		balanceAmong prevData.total, prevData.for, id, false
 		data["created"] = Db.shared.peek("transactions", id, "created")
 		data["updated"] = (new Date())/1000
 	data.total = +data.total
 
 	Db.shared.set 'transactions', id, data
 	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
-	balanceAmong data.total, data.by, id, false
-	balanceAmong data.total, data.for, id, true
 	# Send notifications
 	members = []
 	Db.shared.iterate "transactions", id, "for", (user) !->
@@ -99,8 +126,8 @@ exports.client_transaction = (id, data) !->
 
 	Timer.cancel 'settleRemind', {}
 	allZero = true
-	Db.shared.iterate "balances", (user) !->
-		if user.peek() isnt 0
+	for userId,amount of getBalances()
+		if amount isnt 0
 			allZero = false
 	if not allZero
 		Timer.set 1000*60*60*24*7, 'settleRemind', {}  # Week: 1000*60*60*24*7
@@ -108,60 +135,20 @@ exports.client_transaction = (id, data) !->
 
 # Delete a transaction
 exports.client_removeTransaction = (id) !->
-	transaction = Db.shared.ref("transactions", id)
-	# Undo transaction balance changes
-	balanceAmong transaction.peek("total"), transaction.peek("by"), id, true
-	balanceAmong transaction.peek("total"), transaction.peek("for"), id, false
 	# Remove transaction
 	Db.shared.remove("transactions", id)
 
-# Process a transaction and update balances
-balanceAmong = (total, users, txId = 99, invert) !->
-	divide = []
-	remainder = total
-	totalShare = 0
-	for userId,amount of users
-		if (amount+"").substr(-1) is "%"
-			amount = amount+""
-			percent = +(amount.substring(0, amount.length-1))
-			totalShare += percent
-			divide.push userId
-		else if (""+amount) is "true"
-			divide.push userId
-			totalShare += 100
-		else
-			number = Math.round(+amount)
-			remainder -= number
-			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) * number
-	if remainder isnt 0 and divide.length > 0
-		lateRemainder = remainder
-		while userId = divide.pop()
-			raw = users[userId]
-			percent = 100
-			if (raw+"").substr(-1) is "%"
-				raw = raw+""
-				percent = +(raw.substring(0, raw.length-1))
-			amount = Math.round((remainder)/totalShare*percent)
-			lateRemainder -= amount
-			old = Db.shared.peek('balances', userId)
-			newValue = Db.shared.modify 'balances', userId, (v) -> (v||0) + (if invert then -1 else 1) *  amount
-		if lateRemainder isnt 0  # There is something left (probably because of rounding)
-			distribution = Shared.remainderDistribution users, lateRemainder, txId
-			for userId, amount of distribution
-				Db.shared.modify 'balances', userId, (v) ->
-					return (v||0) + (if invert then -1 else 1) * amount
 
 # Start a settle for all balances
 exports.client_settleStart = !->
 	# Generate required settle transactions
 	negBalances = []
 	posBalances = []
-	Db.shared.iterate "balances", (user) !->
-		if user.peek() > 0
-			posBalances.push([user.key(), user.peek()])
-		else if user.peek() < 0
-			negBalances.push([user.key(), user.peek()])
+	for userId,amount of getBalances()
+		if amount > 0
+			posBalances.push([userId, amount])
+		else if amount < 0
+			negBalances.push([userId, amount])
 	# Check for equal balance differences
 	i = negBalances.length-1
 	settles = {}
@@ -172,7 +159,7 @@ exports.client_settleStart = !->
 			pos = posBalances[j][1]
 			if -neg == pos
 				identifier = negBalances[i][0] + ":" + posBalances[j][0]
-				settles[identifier] = {done: 0, amount: pos}
+				settles[identifier] = {done: false, amount: pos}
 				negBalances.splice(i, 1)
 				posBalances.splice(j, 1)
 				i--
@@ -183,7 +170,7 @@ exports.client_settleStart = !->
 	while negBalances.length > 0 and posBalances.length > 0
 		identifier = negBalances[0][0] + ":" + posBalances[0][0]
 		amount = Math.min(Math.abs(negBalances[0][1]), posBalances[0][1])
-		settles[identifier] = {done: 0, amount: amount}
+		settles[identifier] = {done: false, amount: amount}
 		negBalances[0][1] += amount
 		posBalances[0][1] -= amount
 		if negBalances[0][1] == 0
@@ -227,8 +214,9 @@ exports.reminder = (args) ->
 # Reminder of non-zero balances
 exports.settleRemind = (args) ->
 	users = []
+	balances = getBalances()
 	for userId in Plugin.userIds()
-		if Db.shared.peek("balances", userId) isnt 0
+		if balances[userId] isnt 0
 			users.push userId
 	Event.create
 		unit: "settleRemind"
@@ -238,42 +226,24 @@ exports.settleRemind = (args) ->
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
-	allDone = false
 	members = []
-	Db.shared.iterate "settle", (settle) !->
-		Timer.cancel 'reminder', {users: settle.key()}
-		done = settle.peek("done")
-		if (done is 2 or done is 3)
-			allDone = false
-			[from,to] = settle.key().split(':')
-			members.push from
-			members.push to
-			id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-			transaction = {}
-			forData = {}
-			forData[to] = settle.peek("amount")
-			byData = {}
-			byData[from] = settle.peek("amount")
-			transaction["creatorId"] = -1
-			transaction["for"] = forData
-			transaction["by"] = byData
-			transaction["type"] = "settle"
-			transaction["total"] = settle.peek("amount")
-			transaction["created"] = (new Date()/1000)
-			Db.shared.set 'transactions', id, transaction
-	if allDone
-		Event.create
-			unit: "settleFinish"
-			text: "Settling has finished, everything has been paid"
-			include: members
+	Db.shared.iterate (settle) !->
+		[from,to] = settle.key().split(":")
+		members.push from
+		members.push to
+	Event.create
+		unit: "settleFinish"
+		text: "Settling has been cancelled"
+		include: members
 	Db.shared.remove 'settle'
+
 
 # Sender marks settle as paid
 exports.client_settlePayed = (key) !->
 	[from,to] = key.split(':')
 	return if Plugin.userId() != +from
-	done = Db.shared.modify 'settle', key, 'done', (v) -> (v&~1) | ((v^1)&1)
-	if done is 1 or done is 3
+	done = Db.shared.modify 'settle', key, 'done', (v) -> !v
+	if done
 		Event.create
 			unit: "settlePaid"
 			text: Plugin.userName(from)+" paid you "+formatMoney(Db.shared.peek("settle", key, "amount"))+" to settle, please confirm"
@@ -281,25 +251,33 @@ exports.client_settlePayed = (key) !->
 
 # Receiver marks settle as paid
 exports.client_settleDone = (key) !->
-	amount = Db.shared.get 'settle', key, 'amount'
+	settle = Db.shared.ref 'settle', key
 	[from,to] = key.split(':')
-	return if !amount? or (Plugin.userId() != +to and !Plugin.userIsAdmin())
-	done = Db.shared.modify 'settle', key, 'done', (v) -> (v&~2) | ((v^2)&2)
-	amount = -amount if !(done&2)
-	Db.shared.modify 'balances', from, (v) -> (v||0) + amount
-	Db.shared.modify 'balances', to, (v) -> (v||0) - amount
-	admin = Plugin.userId() != +to
-	if done is 2 or done is 3
-		if admin
-			Event.create
-				unit: "settleDone"
-				text: "Admin "+Plugin.userName(Plugin.userId())+" confirmed a "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
-				include: [from, to]
-		else
-			Event.create
-				unit: "settleDone"
-				text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
-				include: [from]
+	return if (Plugin.userId() != +to and !Plugin.userIsAdmin())
+	id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+	transaction = {}
+	forData = {}
+	forData[to] = settle.peek("amount")
+	byData = {}
+	byData[from] = settle.peek("amount")
+	transaction["creatorId"] = -1
+	transaction["for"] = forData
+	transaction["by"] = byData
+	transaction["type"] = "settle"
+	transaction["total"] = settle.peek("amount")
+	transaction["created"] = (new Date()/1000)
+	Db.shared.set 'transactions', id, transaction
+	if Plugin.userId() != +to
+		Event.create
+			unit: "settleDone"
+			text: "Admin "+Plugin.userName(Plugin.userId())+" confirmed a "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+			include: [from, to]
+	else
+		Event.create
+			unit: "settleDone"
+			text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+			include: [from]
+	Db.shared.remove "settle", key
 
 # Set account of a user
 exports.client_account = (text) !->
@@ -319,3 +297,13 @@ formatMoney = (amount) ->
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
+
+getBalances = ->
+	balances = {}
+	for userId in Plugin.userIds()
+		balances[userId] = 0
+	Db.shared.iterate "transactions", (transaction) !->
+		diff = Shared.transactionDiff(transaction.key())
+		for userId, amount of diff
+			balances[userId] = (balances[userId]||0) + (diff[userId]||0)
+	return balances

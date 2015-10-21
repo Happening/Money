@@ -14,12 +14,16 @@ Time = require 'time'
 Event = require 'event'
 Shared = require 'shared'
 
+balances = Obs.create {}
+
 exports.render = ->
 	req0 = Page.state.get(0)
 	if req0 is 'new'
 		renderEditOrNew()
 		return
 	if req0 is 'balances'
+		Obs.observe !->
+			calculateBalances()
 		renderBalances()
 		return
 	if +req0 and Page.state.get(1) is 'edit'
@@ -28,12 +32,16 @@ exports.render = ->
 	if +req0
 		renderView +req0
 		return
+	Obs.observe !->
+		calculateBalances()
+	renderHome()
 
+renderHome = !->
 	Event.markRead(["transaction"])
 	# Balances
 	Dom.section !->
 		Dom.div !->
-			balance = (Db.shared.get("balances", Plugin.userId())||0)
+			balance = balances.get(Plugin.userId())
 			Dom.style Box: 'horizontal'
 			Dom.div !->
 				Dom.text tr("Show all balances")
@@ -57,24 +65,22 @@ exports.render = ->
 			Page.nav ['balances']
 		Dom.style padding: '16px'
 
-	settleO = Db.shared.ref('settle')
-	if settleO.isHash()
-		renderSettlePane(settleO)
-	else
-		total = getTotalBalance()
-		Obs.observe !->
-			if Math.round(total.get()*100) isnt 0
-				Dom.section !->
-					Dom.style padding: '16px'
-					Dom.div !->
-						Dom.style color: Plugin.colors().highlight
-						Dom.text tr("Settle balances")
-					Dom.div !->
-						Dom.style fontSize: '80%', fontWeight: "normal", marginTop: '3px'
-						Dom.text tr("Ask people to pay their debts")
-					Dom.onTap !->
-						Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
-							Server.call 'settleStart'
+	Obs.observe !->
+		settleO = Db.shared.ref('settle')
+		if settleO.count().get() > 0
+			renderSettlePane(settleO)
+		else if getTotalBalance() isnt 0
+			Dom.section !->
+				Dom.style padding: '16px'
+				Dom.div !->
+					Dom.style color: Plugin.colors().highlight
+					Dom.text tr("Settle balances")
+				Dom.div !->
+					Dom.style fontSize: '80%', fontWeight: "normal", marginTop: '3px'
+					Dom.text tr("Ask people to pay their debts")
+				Dom.onTap !->
+					Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
+						Server.call 'settleStart'
 
 
 	Ui.list !->
@@ -142,19 +148,19 @@ renderBalances = !->
 					Dom.div formatName(userId, true)
 				Dom.div !->
 					Dom.text formatMoney(balance)
-		Db.shared.iterate "balances", (user) !->
+		balances.iterate (user) !->
 			if (!(Plugin.users.get(user.key())?)) and (user.get()||0) is 0
 				return
 			renderItem user.key(), user.get()
 		, (user) ->
 			# Sort users with zero balance to the bottom
-			number = (Db.shared.get("balances", user.key())||0)
+			number = balances.get(user.key())
 			if number is 0
 				return 9007199254740991
 			else
 				return number
 		Plugin.users.iterate (user) !->
-			if !(Db.shared.get("balances", user.key())?)
+			if !(balances.get(user.key())?)
 				renderItem user.key(), 0
 
 		settleO = Db.shared.ref('settle')
@@ -328,7 +334,7 @@ renderEditOrNew = (editId) !->
 	# Description and amount input
 	Dom.div !->
 		# Check if there is an ongoing settle
-		if Db.shared.isHash('settle')
+		if Db.shared.count("settle").get()
 			Dom.div !->
 				Dom.style
 					margin: '0 0 8px'
@@ -439,10 +445,11 @@ renderEditOrNew = (editId) !->
 									result = wholeAndCentToCents(inputField.value(), centField.value())
 									if !isNaN(result)
 										byO.set(userKey, result)
-						if byO.peek(userKey)
-							inputField.value (byO.peek(userKey) - byO.peek(userKey)%100)/100
-						else
-							inputField.value null
+						if inputField?
+							if byO.peek(userKey)
+								inputField.value (byO.peek(userKey) - byO.peek(userKey)%100)/100
+							else
+								inputField.value null
 					Dom.div !->
 						Dom.style
 							width: '10px'
@@ -463,12 +470,13 @@ renderEditOrNew = (editId) !->
 									result = wholeAndCentToCents(inputField.value(), centField.value())
 									if !isNaN(result)
 										byO.set(userKey, result)
-						if (b = byO.peek(userKey)) and (mod = b%100) isnt 0
-							centField.value mod
-						else
-							centField.value null
+						if centField?
+							if (b = byO.peek(userKey)) and (mod = b%100) isnt 0
+								centField.value mod
+							else
+								centField.value null
 					Dom.on 'keydown', (evt) !->
-						if evt.getKeyCode() in [188,190] # comma and dot
+						if evt.getKeyCode() in [188,190,110] # comma and dot
 							centField.focus()
 							centField.select()
 							evt.kill()
@@ -544,10 +552,11 @@ renderEditOrNew = (editId) !->
 																if v and inputField and centField
 																	oldValue = value
 																	value = wholeAndCentToCents(inputField.value(), centField.value())
-														if byO.peek(user.key())
-															inputField.value (byO.peek(user.key()) - (byO.peek(user.key())%100))/100
-														else
-															inputField.value null
+														if inputField?
+															if byO.peek(user.key())
+																inputField.value (byO.peek(user.key()) - (byO.peek(user.key())%100))/100
+															else
+																inputField.value null
 													Dom.div !->
 														Dom.style
 															width: '10px'
@@ -567,12 +576,13 @@ renderEditOrNew = (editId) !->
 																if inputField
 																	oldValue = value
 																	value = wholeAndCentToCents(inputField.value(), centField.value())
-														if byO.peek(user.key()) and (mod = byO.peek(user.key())%100) isnt 0
-															centField.value mod
-														else
-															centField.value null
+														if centField?
+															if byO.peek(user.key()) and (mod = byO.peek(user.key())%100) isnt 0
+																centField.value mod
+															else
+																centField.value null
 													Dom.on 'keydown', (evt) !->
-														if evt.getKeyCode() in [188,190] # comma and dot
+														if evt.getKeyCode() in [188,190,110] # comma and dot
 															centField.focus()
 															centField.select()
 															evt.kill()
@@ -743,7 +753,6 @@ renderEditOrNew = (editId) !->
 										forO.set(user.key(), true)
 								longTap: !->
 									value = undefined
-									oldValue = undefined
 									update = Obs.create(false)
 									Obs.observe !->
 										update.get()
@@ -763,8 +772,7 @@ renderEditOrNew = (editId) !->
 														forO.remove user.key()
 													else
 														forO.set user.key(), v
-											else if not isNaN(+oldValue)
-												amount = +oldValue
+											else if not isNaN(amount)
 												if amount is 0
 													forO.remove user.key()
 												else
@@ -818,13 +826,13 @@ renderEditOrNew = (editId) !->
 															inScope: !->
 																Dom.style textAlign: 'right'
 															onChange: (v) !->
-																if v and inputField and centField
-																	oldValue = value
+																if v and inputField? and centField?
 																	value = wholeAndCentToCents(inputField.value(), centField.value())
-														if forO.peek(user.key()) and (forO.peek(user.key())+"") isnt "true"
-															inputField.value (forO.peek(user.key()) - (forO.peek(user.key())%100))/100
-														else
-															inputField.value null
+														if inputField?
+															if forO.peek(user.key()) and (forO.peek(user.key())+"") isnt "true"
+																inputField.value (forO.peek(user.key()) - (forO.peek(user.key())%100))/100
+															else
+																inputField.value null
 													Dom.div !->
 														Dom.style
 															width: '10px'
@@ -841,14 +849,14 @@ renderEditOrNew = (editId) !->
 																if v<0
 																	centField.value(0)
 																if inputField? and centField?
-																	oldValue = value
 																	value = wholeAndCentToCents(inputField.value(), centField.value())
-														if forO.peek(user.key()) and forO.peek(user.key())%100 isnt 0
-															centField = (byO.peek(user.key())%100)
-														else
-															centField.value null
+														if centField?
+															if forO.peek(user.key()) and forO.peek(user.key())%100 isnt 0
+																centField.value forO.peek(user.key())%100
+															else
+																centField.value null
 													Dom.on 'keydown', (evt) !->
-														if evt.getKeyCode() in [188,190] # comma and dot
+														if evt.getKeyCode() in [188,190,110] # comma and dot
 															centField.focus()
 															centField.select()
 															evt.kill()
@@ -987,7 +995,11 @@ renderEditOrNew = (editId) !->
 		result['by'] = byO.peek()
 		result['for'] = forO.peek()
 		result['text'] = values.text
-		Server.call 'transaction', editId, result
+		Server.sync 'transaction', editId, result, !->
+			id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+			result["creatorId"] = Plugin.userId()
+			result["created"] = (new Date()/1000)
+			Db.shared.set "transactions", id, result
 
 # Sort static on top, then percentage, then remainder, then undefined
 getSortValue = (key) ->
@@ -1028,7 +1040,7 @@ renderSettlePane = (settleO) !->
 				amount = tx.get('amount')
 				Icon.render
 					data: 'good2'
-					color: if done&2 then '#080' else if done&1 then '#777' else '#ccc'
+					color: if done then '#777' else '#ccc'
 					style: {marginRight: '10px'}
 				statusText = undefined
 				statusBold = false
@@ -1036,85 +1048,79 @@ renderSettlePane = (settleO) !->
 				isTo = +to is Plugin.userId()
 				isFrom = +from is Plugin.userId()
 				# Determine status text
-				if done&2
-					statusText = tr("%1 received %2 from %3", formatName(to,true), formatMoney(amount), formatName(from))
+				if done
+					statusBold = isTo
+					statusText = tr("%1 paid %2 to %3, waiting for confirmation", formatName(from,true), formatMoney(amount), formatName(to))
 				else
-					if done&1
-						statusBold = isTo
-						statusText = tr("%1 paid %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
-					else
-						statusBold = isFrom || isTo
-						statusText = tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
+					statusBold = isFrom || isTo
+					statusText = tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
 				# Determine action text and tap action
 				paidToggle = !->
 					Server.sync 'settlePayed', tx.key(), !->
-						result = (done&~1) | ((done^1)&1)
-						tx.set 'done', result
-				doneToggle = !->
+						tx.modify 'done', (v) -> !v
+				doneConfirm = !->
 					Server.sync 'settleDone', tx.key(), !->
-						result = (done&~2) | ((done^2)&2)
-						tx.set 'done', result
-				confirmAdminCancel = !->
-					Dom.onTap !->
-						Modal.confirm tr("Unconfirm as admin?")
-							, tr("This will unconfirm receipt of payment by %1", formatName(to))
-							, !->
-								doneToggle()
+						[from,to] = tx.key().split(':')
+						id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
+						transaction = {}
+						forData = {}
+						forData[to] = tx.peek("amount")
+						byData = {}
+						byData[from] = tx.peek("amount")
+						transaction["creatorId"] = -1
+						transaction["for"] = forData
+						transaction["by"] = byData
+						transaction["type"] = "settle"
+						transaction["total"] = tx.peek("amount")
+						transaction["created"] = (new Date()/1000)
+						Db.shared.set "transactions", id, transaction
+						Db.shared.remove "settle", tx.key()
 				confirmAdminDone = !->
 					Dom.onTap !->
 						Modal.confirm tr("Confirm as admin?")
-							, tr("This will confirm receipt of payment by %1", formatName(to))
+							, tr("This will confirm receipt of payment by %1 and move the transaction to the transaction list", formatName(to))
 							, !->
-								doneToggle()
+								doneConfirm()
 				if !isTo and !isFrom
 					if Plugin.userIsAdmin()
-						if done&2
-							confirmText = tr("Tap to unconfirm this payment as admin")
-							confirmAdminCancel()
-						else
-							confirmText = tr("Tap to confirm this payment as admin")
-							confirmAdminDone()
+						confirmText = tr("Tap to confirm this payment as admin")
+						confirmAdminDone()
 				else if !isTo and isFrom
-					if !(done&2)
-						if done&1 # sender confirmed
-							if Plugin.userIsAdmin()
-								confirmText = tr("Waiting for confirmation by %1", formatName(to))
-								Dom.onTap !->
-									Modal.show tr("(Un)confirm payment?")
-										, !->
-											Dom.text tr("Do you want to unconfirm that you paid, or (as admin) confirm receipt of payment by %1?", formatName(to))
-										, (value) !->
-											if value is 'removeSend'
-												paidToggle()
-											else if value is 'confirmPay'
-												doneToggle()
-										, ['cancel', "Cancel", 'removeSend', "Unconfirm", 'confirmPay', "Confirm"]
-							else
-								confirmText = tr("Waiting for confirmation by %1, tap to cancel", formatName(to))
-								Dom.onTap !->
-									paidToggle()
+					if done # sender confirmed
+						if Plugin.userIsAdmin()
+							confirmText = tr("Waiting for confirmation by %1", formatName(to))
+							Dom.onTap !->
+								Modal.show tr("(Un)confirm payment?")
+									, !->
+										Dom.text tr("Do you want to unconfirm that you paid, or (as admin) confirm receipt of payment by %1?", formatName(to))
+									, (value) !->
+										if value is 'removeSend'
+											paidToggle()
+										else if value is 'confirmPay'
+											doneConfirm()
+									, ['cancel', "Cancel", 'removeSend', "Unconfirm", 'confirmPay', "Confirm"]
 						else
-							if account = Db.shared.get('accounts', to)
-								accountTxt = if !!Form.clipboard and Form.clipboard() then tr("%1 (long press to copy)", account) else tr("%1", account)
-								confirmText = tr("Account: %1. Tap to confirm your payment to %2.", accountTxt, formatName(to))
-							else
-								confirmText = tr("Account info missing. Tap to confirm your payment to %1.", formatName(to))
-							Dom.onTap
-								cb: !-> paidToggle()
-								longTap: !->
-									if account and !!Form.clipboard and (clipboard = Form.clipboard())
-										clipboard(account)
-										require('toast').show tr("Account copied to clipboard")
-					else if Plugin.userIsAdmin()
-						confirmText = tr("Tap to unconfirm as admin")
-						confirmAdminCancel()
-				else if isTo and !isFrom
-					if done&2 # receiver confirmed
-						confirmText = tr("Tap to unconfirm")
+							confirmText = tr("Waiting for confirmation by %1, tap to cancel", formatName(to))
+							Dom.onTap !->
+								paidToggle()
 					else
-						confirmText = tr("Tap to confirm receipt of payment")
+						if account = Db.shared.get('accounts', to)
+							accountTxt = if !!Form.clipboard and Form.clipboard() then tr("%1 (long press to copy)", account) else tr("%1", account)
+							confirmText = tr("Account: %1. Tap to confirm your payment to %2.", accountTxt, formatName(to))
+						else
+							confirmText = tr("Account info missing. Tap to confirm your payment to %1.", formatName(to))
+						Dom.onTap
+							cb: !-> paidToggle()
+							longTap: !->
+								if account and !!Form.clipboard and (clipboard = Form.clipboard())
+									clipboard(account)
+									require('toast').show tr("Account copied to clipboard")
+				else if isTo and !isFrom
+					confirmText = tr("Tap to confirm receipt of payment")
 					Dom.onTap !->
-						doneToggle()
+						Modal.confirm tr("Confirm payment received?")
+							, tr("Confirming will move the transaction to the transaction list")
+							, !-> doneConfirm()
 				else
 					# Should never occur (incorrect settle)
 				Dom.div !->
@@ -1125,67 +1131,20 @@ renderSettlePane = (settleO) !->
 							Dom.style fontSize: '80%'
 							Dom.text confirmText
 
-				###
-					if done&2
-						Dom.text tr("%1 received %2 from %3", formatName(to,true), formatMoney(amount), formatName(from))
-					else
-						if done&1
-							Dom.text tr("%1 paid %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
-						else
-							Dom.span !->
-								Dom.style
-									fontWeight: if +from is Plugin.userId() then 'bold' else ''
-								Dom.text tr("%1 should pay %2 to %3", formatName(from,true), formatMoney(amount), formatName(to))
-
-						Dom.div !->
-							Dom.style
-								fontSize: '80%'
-								fontWeight: if +to is Plugin.userId() then 'bold' else ''
-
-							if +to is Plugin.userId()
-								Dom.text tr("Tap to confirm receipt of payment")
-							else if Plugin.userIsAdmin(+to)
-								Dom.text tr("Tap to confirm as admin")
-							else if done&1
-								Dom.text tr("Waiting for %1 to confirm payment", formatName(to))
-							else if account = Db.shared.get('accounts', to)
-								Dom.text tr("Account: %1", account)
-							else
-								Dom.text tr("%1 has not entered account info", formatName(to))
-
-				if +from is Plugin.userId() and !(done&2)
-					Dom.onTap !->
-						Server.sync 'settlePayed', tx.key(), !->
-							tx.set 'done', (done&~1) | ((done^1)&1)
-
-				else if +to is Plugin.userId()
-					Dom.onTap !->
-						Server.sync 'settleDone', tx.key(), !->
-							tx.set 'done', (done&~2) | ((done^2)&2)
-				###
-
 		Dom.div !->
 			Dom.style textAlign: 'right'
-			complete = true
 			sentButNotReceived = false
 			for k,v of settleO.get()
-				if v.done&1 and !(v.done&2)
+				if v.done
 					sentButNotReceived = true
-				if !(v.done&2)
-					complete = false
-
-			if complete
-				Ui.button tr("Finish"), !->
-					Modal.confirm tr("Finish settle?"), tr("The settle payments will be added to the list of transactions, concluding the settle"), !->
-						Server.call 'settleStop'
-			else if Plugin.userIsAdmin() # serverside this case will not be checked, ah well --Jelmer
-				Ui.button tr("Postpone"), !->
+			if Plugin.userIsAdmin() # serverside this case will not be checked, ah well --Jelmer
+				Ui.button tr("Cancel"), !->
 					if sentButNotReceived
-						Modal.show tr("Postpone not allowed"), tr("Please (un)confirm receipt of sent payments (dark gray checkmarks) before postponing the settle")
+						Modal.show tr("Cancel not allowed"), tr("Please (un)confirm receipt of sent payments (dark gray checkmarks) before postponing the settle")
 					else
-						Modal.confirm tr("Postpone settle?"), !->
-							Dom.userText tr("Payments that have been confirmed by the receiver will be saved")
-						, !-> Server.call 'settleStop'
+						Modal.confirm tr("Cancel settle?"), !->
+							Dom.userText tr("You can start a new settle later")
+						, !-> Server.sync 'settleStop', !-> Db.shared.remove 'settle'
 
 
 formatMoney = (amount) ->
@@ -1319,19 +1278,29 @@ capitalizeFirst = (string) ->
 
 getTotalBalance = ->
 	total = Obs.create 0
-	Db.shared.iterate "balances", (user) !->
+	balances.iterate (user) !->
 		value = user.get()
 		total.modify((v) -> (v||0)+Math.abs(value))
 		Obs.onClean !->
 			total.modify((v) -> (v||0)-Math.abs(value))
-	total
+	total.get()
 
 wholeAndCentToCents = (whole, cent) ->
-	whole = +(whole||0)
-	cent = +(cent||0)
-	if cent > 0 and cent < 10
-		cent *=10
-	return whole*100 + cent
+	if cent?.length<2
+		cent = cent+'0'
+	(0|whole)*100 + (0|cent)
+
+calculateBalances = !->
+	Plugin.users.iterate (user) !->
+		balances.set user.key(), 0
+	Obs.observe !->
+		Db.shared.iterate "transactions", (transaction) !->
+			diff = Shared.transactionDiff(transaction.key())
+			for userId, amount of diff
+				balances.modify userId, (v) -> v + (diff[userId]||0)
+			Obs.onClean !->
+				for userId, amount of diff
+					balances.modify userId, (v) -> v - (diff[userId]||0)
 
 Dom.css
 	'.selected:not(.tap)':
