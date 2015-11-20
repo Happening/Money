@@ -7,58 +7,6 @@ Shared = require 'shared'
 
 exports.onUpgrade = !->
 	log '[onUpgrade()] at '+new Date()
-	if (Db.shared.get("version")||0) < 2
-		log "Upgrading: settle float to int fix and balance changes (marked as U2)"
-		Db.shared.set "version", 2
-
-		isFloat = (number) ->
-			return number % 1 isnt 0
-		convert = (number) ->
-			Math.round((number||0)*100)
-		if Db.shared.isHash("settle")
-			# Fix float settles
-			hasFloats = false
-			Db.shared.iterate "settle", (settle) !->
-				hasFloats = hasFloats || isFloat((settle.get("amount")||0))
-			if hasFloats
-				Db.shared.iterate "settle", (settle) !->
-					log "U2: Settle amount upgraded to integer: oldAmount="+settle.get("amount")
-					settle.modify "amount", (v) -> convert(v)
-
-			# Handle confirmed transactions
-			Db.shared.iterate "settle", (settle) !->
-				done = settle.get("done")
-				if done is 2 or done is 3
-					[from,to] = settle.key().split(':')
-					id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-					transaction = {}
-					forData = {}
-					forData[to] = settle.peek("amount")
-					byData = {}
-					byData[from] = settle.peek("amount")
-					transaction["creatorId"] = -1
-					transaction["for"] = forData
-					transaction["by"] = byData
-					transaction["type"] = "settle"
-					transaction["total"] = settle.peek("amount")
-					transaction["created"] = (new Date()/1000)
-					Db.shared.set 'transactions', id, transaction
-					log "U2: added transaction for settle: "+settle.key()+", amount="+settle.peek("amount")
-					Db.shared.remove "settle", settle.key()
-		# Transaction added by corrupt settle
-		Db.shared.iterate "transactions", (transaction) !->
-			if transaction.get("type") is "settle" and isFloat(transaction.get("total"))
-				# Is an incorrect transaction, do *100
-				oldTotal = transaction.get("total")
-				transaction.modify "total", (v) -> convert(v)
-				transaction.iterate "for", (line) !->
-					line.modify (v) -> convert(v)
-				transaction.iterate "by", (line) !->
-					line.modify (v) -> convert(v)
-				log "U2: multiplied settle transaction by 100, id="+transaction.key()+", oldTotal="+oldTotal
-
-		Db.shared.remove "balances"
-
 
 exports.onInstall = (config = {}) !->
 	onConfig(config)
@@ -205,12 +153,14 @@ exports.client_settleStart = !->
 # Triggered when a settle reminder happens
 ## args.users = key to settle transaction
 exports.reminder = (args) ->
-	[from,to] = args.users.split(':')
-	Event.create
-		unit: "settlePayRemind"
-		text: "Reminder: there is an open settle to "+Plugin.userName(to)
-		include: from
-	Timer.set 1000*60*60*24*7, 'reminder', args
+	if Db.shared.isHash('settle', args.users)
+		[from,to] = args.users.split(':')
+		Event.create
+			unit: "settlePayRemind"
+			text: "Reminder: there is an open settle to "+Plugin.userName(to)
+			include: from
+		if Db.shared.isHash('settle', args.users)
+			Timer.set 1000*60*60*24*7, 'reminder', args
 
 
 # Reminder of non-zero balances
@@ -220,11 +170,12 @@ exports.settleRemind = (args) ->
 	for userId in Plugin.userIds()
 		if balances[userId] isnt 0
 			users.push userId
-	Event.create
-		unit: "settleRemind"
-		text: "Reminder: there are balances to settle"
-		include: users
-	Timer.set 1000*60*60*24*7, 'settleRemind', args
+	if users.length > 0 and !Db.shared.isHash('settle')
+		Event.create
+			unit: "settleRemind"
+			text: "Reminder: there are balances to settle"
+			include: users
+		Timer.set 1000*60*60*24*7, 'settleRemind', args
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
@@ -233,11 +184,13 @@ exports.client_settleStop = !->
 		[from,to] = settle.key().split(":")
 		members.push from
 		members.push to
+		Timer.cancel 'reminder', {users: settle.key()}
 	Event.create
 		unit: "settleFinish"
 		text: "Settling has been cancelled"
 		include: members
 	Db.shared.remove 'settle'
+	Timer.set 1000*60*60*24*7, 'settleRemind', {}
 
 
 # Sender marks settle as paid
@@ -280,6 +233,8 @@ exports.client_settleDone = (key) !->
 			text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
 			include: [from]
 	Db.shared.remove "settle", key
+	# Cancel reminder for this notification
+	Timer.cancel 'reminder', {users: key}
 
 # Set account of a user
 exports.client_account = (number, name) !->
