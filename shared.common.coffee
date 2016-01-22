@@ -1,5 +1,5 @@
 Db = require 'db'
-Plugin = require 'plugin'
+App = require 'app'
 
 # Distribute cents to users deterministically
 exports.remainderDistribution = remainderDistribution = (users, remainder, transactionNumber) ->

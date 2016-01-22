@@ -2,5 +2,4 @@ name: Split the bill
 description: Keep track of who owes money to whom.
 api: 2
 icon: coins
-hint: Keep track of who owes money to whom
-store: 800
+store: 900

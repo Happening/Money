@@ -1,15 +1,15 @@
+Comments = require 'comments'
 Db = require 'db'
 Dom = require 'dom'
 Form = require 'form'
 Icon = require 'icon'
 Modal = require 'modal'
 Obs = require 'obs'
-Plugin = require 'plugin'
+App = require 'app'
 Page = require 'page'
 Server = require 'server'
 Ui = require 'ui'
 {tr} = require 'i18n'
-Social = require 'social'
 Time = require 'time'
 Event = require 'event'
 Shared = require 'shared'
@@ -20,7 +20,7 @@ balances = Obs.create {}
 exports.render = ->
 
 	req0 = Page.state.get(0)
-	if req0 is 'new'
+	if req0 is 'new' || (Db.shared.get('setupFirst') and App.ownerId() is App.userId())
 		renderEditOrNew()
 		return
 	if req0 is 'balances'
@@ -37,17 +37,25 @@ exports.render = ->
 	renderHome()
 
 renderHome = !->
+	Comments.enable
+		messages:
+			settleStart: (c) -> tr("%1 started a settle", c.user)
+			settleCancel: (c) -> tr("%1 canceled the settle", c.user)
+			settleDone: (c) -> tr("%1 finished the settle!", c.user)
+			settleRemind: (c) -> tr("Reminder: there are balances to settle")
+
+	Page.setCardBackground();
 	Event.markRead(["transaction"])
 	# Balances
 	Dom.section !->
 		Dom.div !->
-			balance = balances.get(Plugin.userId())
+			balance = balances.get(App.userId())||0
 			Dom.style Box: 'horizontal'
 			Dom.div !->
 				Dom.text tr("Show all balances")
 				Dom.style
 					Flex: true
-					color: Plugin.colors().highlight
+					color: App.colors().highlight
 					marginTop: '1px'
 			Dom.div !->
 				Dom.text "You:"
@@ -73,7 +81,7 @@ renderHome = !->
 			Dom.section !->
 				Dom.style padding: '16px'
 				Dom.div !->
-					Dom.style color: Plugin.colors().highlight
+					Dom.style color: App.colors().highlight
 					Dom.text tr("Settle balances")
 				Dom.div !->
 					Dom.style fontSize: '80%', fontWeight: "normal", marginTop: '3px'
@@ -88,7 +96,7 @@ renderHome = !->
 		Ui.item !->
 			Dom.text "+ Add transaction"
 			Dom.style
-				color: Plugin.colors().highlight
+				color: App.colors().highlight
 			Dom.onTap !->
 				Page.nav ['new']
 		# Latest transactions
@@ -118,7 +126,7 @@ renderHome = !->
 							Box: 'vertical'
 							Dom.style textAlign: 'right', paddingLeft: '10px'
 							Dom.div !->
-								share = calculateShare(tx, Plugin.userId())
+								share = calculateShare(tx, App.userId())
 								stylePositiveNegative(share)
 								Dom.text formatMoney(share)
 								if share is 0
@@ -135,44 +143,38 @@ renderHome = !->
 
 renderBalances = !->
 	Page.setTitle tr("All balances")
-	Ui.list !->
-		Dom.h2 tr("Balances")
-		renderItem = (userId, balance) !->
-			Ui.item !->
-				stylePositiveNegative(balance)
-				Ui.avatar Plugin.userAvatar(userId),
-					onTap: (!-> Plugin.userInfo(userId))
-					style: marginRight: "10px"
-				Dom.div !->
-					Dom.style Flex: true
-					Dom.div formatName(userId, true)
-				Dom.div !->
-					Dom.text formatMoney(balance)
-		balances.iterate (user) !->
-			if (!(Plugin.users.get(user.key())?)) and (user.get()||0) is 0
-				return
-			renderItem user.key(), user.get()
-		, (user) ->
-			# Sort users with zero balance to the bottom
-			number = balances.get(user.key())
-			if number is 0
-				return 9007199254740991
-			else
-				return number
-		Plugin.users.iterate (user) !->
-			if !(balances.get(user.key())?)
-				renderItem user.key(), 0
+	Dom.h2 tr("Balances")
+	renderItem = (userId, balance) !->
+		Ui.item !->
+			stylePositiveNegative(balance)
+			Ui.avatar App.userAvatar(userId),
+				onTap: (!-> App.showMemberInfo(userId))
+				style: marginRight: "12px"
+			Dom.div !->
+				Dom.style Flex: true
+				Dom.div formatName(userId, true)
+			Dom.div !->
+				Dom.text formatMoney(balance)
+	balances.iterate (b) !->
+		renderItem b.key(), b.get()
+	, (b) ->
+		(b || Infinity)
 
-		settleO = Db.shared.ref('settle')
-		if !settleO.isHash()
-			Obs.observe !->
-				if getTotalBalance() isnt 0
-					Dom.div !->
-						Dom.style textAlign: 'right'
-						Ui.button tr("Settle"), !->
-							Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
-								Server.call 'settleStart'
-								Page.back()
+	# Full up with users not in balances
+	App.users.iterate (user) !->
+		renderItem user.key(), 0
+	, (user) ->
+		true if !balances.get(user.key())
+
+	settleO = Db.shared.ref('settle')
+	if !settleO.isHash()
+		Obs.observe !->
+			if getTotalBalance() isnt 0
+				Dom.div !->
+					Ui.lightButton tr("Settle"), !->
+						Modal.confirm tr("Start settle?"), tr("People with a negative balance are asked to pay up. People with a positive balance need to confirm receipt of the payments."), !->
+							Server.call 'settleStart'
+							Page.back()
 
 # Render a transaction
 renderView = (txId) !->
@@ -183,66 +185,50 @@ renderView = (txId) !->
 		return
 	Page.setTitle "Transaction"
 	Event.showStar tr("this transaction")
+
 	# Set the page actions
 	Page.setActions
 		icon: 'edit'
 		label: "Edit transaction"
 		action: !->
 			Page.nav [transaction.key(), 'edit']
+
 	# Render paid by items
 	Dom.div !->
-		Dom.style
-			margin: "-8px -8px 8px -8px"
-			borderBottom: '2px solid #ccc'
-			padding: '8px'
-			backgroundColor: "#FFF"
-		Dom.div !->
-			Dom.style fontSize: "150%"
-			if Db.shared.get("transactions", txId, "type") is 'settle'
-				Dom.text tr("Settle payment")
+		Dom.style fontSize: "150%"
+		if Db.shared.get("transactions", txId, "type") is 'settle'
+			Dom.text tr("Settle payment")
+		else
+			Dom.text transaction.get("text")
+	Dom.div !->
+		Dom.style fontSize: '80%'
+		created = Db.shared.get("transactions", txId, "created")
+		updated = Db.shared.get("transactions", txId, "updated")
+		if created?
+			creatorId = Db.shared.get("transactions", txId, "creatorId")
+			if creatorId>=0
+				Dom.text tr("Added by %1 ", App.userName(creatorId))
 			else
-				Dom.text transaction.get("text")
-		Dom.div !->
-			Dom.style fontSize: '80%', margin: "5px 0 5px 0"
-			created = Db.shared.get("transactions", txId, "created")
-			updated = Db.shared.get("transactions", txId, "updated")
-			if created?
-				creatorId = Db.shared.get("transactions", txId, "creatorId")
-				if creatorId>=0
-					Dom.text tr("Added by %1 ", Plugin.userName(creatorId))
-				else
-					Dom.text tr("Generated by the app ")
-				Time.deltaText created
-				if updated?
-					Dom.text tr(", edited ")
-					Time.deltaText updated
-		Dom.div !->
-			Dom.style marginTop: "15px"
-			Dom.h2 tr("Paid by")
-			renderBalanceSplitSection(transaction.get("total"), transaction.ref("by"), transaction.key())
-		# Render paid for items
-		Dom.div !->
-			Dom.style marginTop: "15px"
-			Dom.h2 tr("Paid for")
-			renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"), transaction.key())
-	# Comments
-	renderSystemComment = (comment) ->
-		if comment.get('system')? and comment.get('system')
-			Dom.div !->
-				Dom.span !->
-					Dom.style color: '#999'
-					Time.deltaText comment.get('t')
-					Dom.text " • "
-				Dom.style
-					margin: '6px 0px 6px 56px'
-					fontSize: '70%'
-				Event.styleNew(comment.get('t'))
-				Dom.text Plugin.userName(comment.get('u'))+" edited the transaction"
-			return true
-		return false
-	Social.renderComments
-		path: [txId]
-		content: renderSystemComment
+				Dom.text tr("Generated by the app ")
+			Time.deltaText created
+			if updated?
+				Dom.text tr(", edited ")
+				Time.deltaText updated
+	Dom.div !->
+		Dom.style marginTop: "15px"
+		Dom.h2 tr("Paid by")
+		renderBalanceSplitSection(transaction.get("total"), transaction.ref("by"), transaction.key())
+
+	# Render paid for items
+	Dom.div !->
+		Dom.style marginTop: "15px"
+		Dom.h2 tr("Paid for")
+		renderBalanceSplitSection(transaction.get("total"), transaction.ref("for"), transaction.key())
+
+	Comments.enable
+		legacyStore: txId
+		messages:
+			edited: (c) -> tr("%1 edited the transaction",c.user)
 
 renderBalanceSplitSection = (total, path, transactionNumber) !->
 	remainder = Obs.create(total)
@@ -295,8 +281,8 @@ renderBalanceSplitSection = (total, path, transactionNumber) !->
 					remainder.modify((v) -> v+number)
 					lateRemainder.modify((v) -> v+number)
 			Ui.item !->
-				Ui.avatar Plugin.userAvatar(user.key()),
-					onTap: (!-> Plugin.userInfo(user.key()))
+				Ui.avatar App.userAvatar(user.key()),
+					onTap: (!-> App.showMemberInfo(user.key()))
 					style: marginRight: "10px"
 				Dom.div !->
 					Dom.style Flex: true
@@ -331,9 +317,10 @@ renderEditOrNew = (editId) !->
 	forO = undefined
 	multiplePaidBy = Obs.create(false)
 	# Description and amount input
-	Dom.div !->
+	Obs.observe !->
 		# Check if there is an ongoing settle
 		if Db.shared.count("settle").get()
+			###
 			Dom.div !->
 				Dom.style
 					margin: '0 0 8px'
@@ -342,6 +329,8 @@ renderEditOrNew = (editId) !->
 					fontSize: '80%'
 					padding: '8px'
 					fontStyle: 'italic'
+			###
+			Ui.top !->
 				Dom.text tr("There is an ongoing settle. ")
 				if editId
 					Dom.text tr("It will not include changes to this transaction.")
@@ -349,11 +338,6 @@ renderEditOrNew = (editId) !->
 					Dom.text tr("It will not include new transactions.")
 
 
-		Dom.style
-			margin: "-8px -8px 8px -8px"
-			borderBottom: '2px solid #ccc'
-			padding: '8px'
-			backgroundColor: "#FFF"
 		Dom.div !->
 			Dom.style Box: 'top'
 			Dom.div !->
@@ -363,10 +347,15 @@ renderEditOrNew = (editId) !->
 					defaultValue = "Settle payment"
 				else if edit
 					defaultValue = edit.get('text')
+				else if Db.shared.get('setupFirst')
+					defaultValue = App.title()
+
+				hideDescr = Db.shared.get('setupFirst') and App.userId() is App.ownerId()
 				Form.input
 					name: 'text'
 					value: defaultValue
 					text: tr("Description")
+					style: display: (if hideDescr then 'none' else 'block')
 		Dom.div !->
 			Dom.style fontSize: '80%'
 			created = Db.shared.get("transactions", editId, "created")
@@ -374,14 +363,14 @@ renderEditOrNew = (editId) !->
 			if created?
 				creatorId = Db.shared.get("transactions", editId, "creatorId")
 				if creatorId>=0
-					Dom.text tr("Added by %1 ", Plugin.userName(creatorId))
+					Dom.text tr("Added by %1 ", App.userName(creatorId))
 				else
 					Dom.text tr("Generated by the app ")
 				Time.deltaText created
 				if updated?
 					Dom.text tr(", last edited ")
 					Time.deltaText updated
-			# No amount entered	
+			# No amount entered
 			Form.condition (values) ->
 				if (not (values.text?)) or values.text.length < 1
 					return tr("Enter a description")
@@ -393,7 +382,7 @@ renderEditOrNew = (editId) !->
 		if edit
 			byO.set edit.get('by')
 		else
-			byO.set Plugin.userId(), 0
+			byO.set App.userId(), 0
 		multiplePaidBy.set(byO.count().peek() > 1)
 		# Set the total
 		Obs.observe !->
@@ -415,8 +404,8 @@ renderEditOrNew = (editId) !->
 					userKey = ""
 					byO.iterate (user) !->
 						userKey = user.key()
-					Ui.avatar Plugin.userAvatar(userKey),
-						onTap: (!-> Plugin.userInfo(userKey))
+					Ui.avatar App.userAvatar(userKey),
+						onTap: (!-> App.showMemberInfo(userKey))
 						style: marginRight: "10px"
 					Dom.div !->
 						Dom.style Flex: true
@@ -427,7 +416,7 @@ renderEditOrNew = (editId) !->
 							currency = Db.shared.get("currency")
 						Dom.text currency
 						Dom.style
-							margin: '-3px 5px 0 0'
+							margin: '-14px 5px 0 0'
 							fontSize: '21px'
 					inputField = undefined
 					centField = undefined
@@ -437,8 +426,8 @@ renderEditOrNew = (editId) !->
 							name: 'paidby'
 							type: 'number'
 							text: '0'
-							inScope: !->
-								Dom.style textAlign: 'right'
+							style:
+								textAlign: 'right'
 							onChange: (v) !->
 								if v and inputField and centField
 									result = wholeAndCentToCents(inputField.value(), centField.value())
@@ -457,7 +446,7 @@ renderEditOrNew = (editId) !->
 							margin: '-20px 0 -20px 0'
 						Dom.text ","
 					Dom.div !->
-						Dom.style width: '50px', margin: '-20px 0 -20px 0'
+						Dom.style width: '60px', margin: '-20px 0 -20px 0'
 						centField = Form.input
 							name: 'paidby2'
 							type: 'number'
@@ -484,8 +473,8 @@ renderEditOrNew = (editId) !->
 				# Set form input
 				Obs.observe !->
 					Dom.div !->
-						Dom.style margin: '5px -5px 0 -5px'
-						Plugin.users.iterate (user) !->
+						#Dom.style margin: '5px -5px 0 -5px'
+						App.users.iterate (user) !->
 							amount = byO.get(user.key())
 							number = 0
 							suffix = undefined
@@ -535,7 +524,7 @@ renderEditOrNew = (editId) !->
 															currency = Db.shared.get("currency")
 														Dom.text currency
 														Dom.style
-															margin: '20px 5px 0px 0px'
+															margin: '14px 5px 0px 0px'
 															fontSize: '21px'
 													inputField = undefined
 													centField = undefined
@@ -545,8 +534,7 @@ renderEditOrNew = (editId) !->
 															name: 'paidby'
 															type: 'number'
 															text: '0'
-															inScope: !->
-																Dom.style textAlign: 'right'
+															style: {textAlign: 'right'}
 															onChange: (v) !->
 																if v and inputField and centField
 																	oldValue = value
@@ -563,7 +551,7 @@ renderEditOrNew = (editId) !->
 															padding: '23px 0 0 4px'
 														Dom.text ","
 													Dom.div !->
-														Dom.style width: '50px'
+														Dom.style width: '60px'
 														centField = Form.input
 															name: 'paidby2'
 															type: 'number'
@@ -592,7 +580,7 @@ renderEditOrNew = (editId) !->
 											, ['ok', "Ok", 'cancel', "Cancel"]
 									Dom.style
 										fontWeight: if amount then 'bold' else ''
-									Ui.avatar Plugin.userAvatar(user.key()), style: marginRight: "10px"
+									Ui.avatar App.userAvatar(user.key()), style: marginRight: "10px"
 									Dom.div !->
 										Dom.style
 											Flex: true
@@ -619,11 +607,11 @@ renderEditOrNew = (editId) !->
 														color: '#080'
 
 		Obs.observe !->
-			if not multiplePaidBy.get() and Plugin.users.count().get() > 1
+			if not multiplePaidBy.get() and App.users.count().get() > 1
 				Dom.div !->
 					Dom.style
 						textAlign: 'center'
-						color: Plugin.colors().highlight
+						color: App.colors().highlight
 						fontSize: "80%"
 						padding: "7px"
 						margin: "0 0 -8px 0"
@@ -648,6 +636,9 @@ renderEditOrNew = (editId) !->
 		forO = Obs.create {}
 		if edit
 			forO.set edit.get('for')
+		if Db.shared.get('setupFirst')
+			App.users.iterate (user) !->
+				forO.set(user.key(), true)
 		[handleChange] = Form.makeInput
 			name: 'for'
 			value: forO.peek()
@@ -663,20 +654,20 @@ renderEditOrNew = (editId) !->
 			distribution.set Shared.remainderDistribution(usersList.peek(), lateRemainder.get(), transactionNumber)
 		# Select/deselect all button
 		Obs.observe !->
-			users = Plugin.users.count().get()
+			users = App.users.count().get()
 			selected = forO.count().get()
 			Dom.div !->
 				Dom.text "Select all" if selected < users
 				Dom.text "Deselect all" if selected is users
 				Dom.style
 					float: 'right'
-					margin: '-34px -8px -20px 0'
+					margin: '-34px 6px -20px 0'
 					padding: '9px 8px 2px 8px'
-					color: Plugin.colors().highlight
+					color: App.colors().highlight
 					fontSize: '80%'
 				Dom.onTap !->
 					if selected < users
-						Plugin.users.iterate (user) !->
+						App.users.iterate (user) !->
 							if forO.peek(user.key()) is undefined
 								forO.set(user.key(), true)
 					else
@@ -684,8 +675,9 @@ renderEditOrNew = (editId) !->
 		# Render page
 		Obs.observe !->
 			Dom.div !->
-				Dom.style margin: '5px -5px 0 -5px', _userSelect: 'none'
-				Plugin.users.iterate (user) !->
+				#Dom.style margin: '5px -5px 0 -5px', _userSelect: 'none'
+				Dom.style MarginPolicy: 'pad', padding: '0 8px'
+				App.users.iterate (user) !->
 					amount = forO.get(user.key())
 					number = Obs.create 0
 					suffix = undefined
@@ -783,7 +775,7 @@ renderEditOrNew = (editId) !->
 										Obs.observe !->
 											if procentual.get()
 												Dom.div !->
-													Dom.style Box: 'horizontal'
+													Dom.style Box: 'horizontal center'
 													Dom.div !->
 														Dom.style width: '80px'
 														defaultValue = undefined
@@ -800,19 +792,19 @@ renderEditOrNew = (editId) !->
 																return
 													Dom.div !->
 														Dom.style
-															margin: '20px 5px 0px 0px'
+															margin: '14px 5px 0px 0px'
 															fontSize: '21px'
 														Dom.text "%"
 											else
 												Dom.div !->
-													Dom.style Box: "horizontal"
+													Dom.style Box: "horizontal center"
 													Dom.div !->
 														currency = "€"
 														if Db.shared.get("currency")
 															currency = Db.shared.get("currency")
 														Dom.text currency
 														Dom.style
-															margin: '20px 5px 0px 0px'
+															margin: '14px 5px 0px 0px'
 															fontSize: '21px'
 													inputField = undefined
 													centField = undefined
@@ -822,8 +814,7 @@ renderEditOrNew = (editId) !->
 															name: 'paidby'
 															type: 'number'
 															text: '0'
-															inScope: !->
-																Dom.style textAlign: 'right'
+															style: {textAlign: 'right'}
 															onChange: (v) !->
 																if v and inputField? and centField?
 																	value = wholeAndCentToCents(inputField.value(), centField.value())
@@ -839,7 +830,7 @@ renderEditOrNew = (editId) !->
 															padding: '23px 0 0 4px'
 														Dom.text ","
 													Dom.div !->
-														Dom.style width: '50px'
+														Dom.style width: '60px'
 														centField = Form.input
 															name: 'paidby2'
 															type: 'number'
@@ -864,9 +855,8 @@ renderEditOrNew = (editId) !->
 										Dom.div !->
 											Dom.style
 												display: 'inline-block'
-												color: Plugin.colors().highlight
+												color: App.colors().highlight
 												padding: "5px"
-												margin: "0 -5px 0 -5px"
 											if procentual.get()
 												Dom.style fontWeight: 'normal'
 											else
@@ -878,9 +868,8 @@ renderEditOrNew = (editId) !->
 										Dom.div !->
 											Dom.style
 												display: 'inline-block'
-												color: Plugin.colors().highlight
+												color: App.colors().highlight
 												padding: "5px"
-												margin: "0 -5px 0 -5px"
 											if !procentual.get()
 												Dom.style fontWeight: 'normal'
 											else
@@ -895,7 +884,7 @@ renderEditOrNew = (editId) !->
 							Dom.style
 								fontWeight: if amount then 'bold' else ''
 								clear: 'both'
-							Ui.avatar Plugin.userAvatar(user.key()), style: marginRight: "10px"
+							Ui.avatar App.userAvatar(user.key()), style: marginRight: "10px"
 							Dom.div !->
 								Dom.style
 									Flex: true
@@ -976,7 +965,7 @@ renderEditOrNew = (editId) !->
 
 	if Db.shared.peek("transactions", editId)?
 		Page.setActions
-			icon: 'trash'
+			icon: 'delete'
 			label: "Remove transaction"
 			action: !->
 				Modal.confirm "Remove transaction",
@@ -988,7 +977,7 @@ renderEditOrNew = (editId) !->
 						Page.back()
 
 	Form.setPageSubmit (values) !->
-		Page.up()
+		Page.nav()
 		result = {}
 		result['total'] = totalO.peek()
 		result['by'] = byO.peek()
@@ -996,7 +985,7 @@ renderEditOrNew = (editId) !->
 		result['text'] = values.text
 		Server.sync 'transaction', editId, result, !->
 			id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-			result["creatorId"] = Plugin.userId()
+			result["creatorId"] = App.userId()
 			result["created"] = (new Date()/1000)
 			Db.shared.set "transactions", id, result
 
@@ -1013,7 +1002,8 @@ getSortValue = (key) ->
 
 renderSettlePane = (settleO) !->
 	Ui.list !->
-		Dom.h2 tr("Settle")
+		Form.label !->
+			Dom.text tr("Settle")
 		Dom.div !->
 			Dom.style
 				Flex: true
@@ -1025,49 +1015,46 @@ renderSettlePane = (settleO) !->
 				fontStyle: 'italic'
 
 			infoRequired = false
-			if account = Db.shared.get('accounts', Plugin.userId())
-				Dom.text tr("Your account number: %1", account)
+			if account = Db.shared.get('accounts', App.userId())
+				Dom.text tr("Your bank account: %1", account.toUpperCase())
+				if name = Db.shared.get("accountNames", App.userId())
+					Dom.text " / " + name
+				else
+					infoRequired = tr("Tap to input account holder name")
+				Dom.br()
 			else
-				infoRequired = true
-				Dom.text tr("Tap to setup your account number")
-			Dom.br()
-			if name = Db.shared.get("accountNames", Plugin.userId())
-				Dom.text tr("Your account holder name: %1", name)
-			else
-				infoRequired = true
-				Dom.text tr("Account holder missing")
+				infoRequired = tr("Tap to input your bank account number")
+
 			if infoRequired
+				Dom.text infoRequired
 				Dom.style
 					fontWeight: "bold"
 					fontStyle: "normal"
-					backgroundColor: "#E41B1B"
+					backgroundColor: App.colors().highlight
+
 			Dom.onTap !->
 				account = undefined
 				name = undefined
 				Modal.show tr("Enter account information"), !->
 					Dom.div !->
-						Dom.style
-							margin: "0 0 -10 0"
 						Dom.text "Account number"
 					account = Form.input
 						name: 'account'
 						type: 'text'
-					account.value (if (currentAccount = Db.shared.get("accounts", Plugin.userId()))? then currentAccount else "")
+					account.value (if (currentAccount = Db.shared.get("accounts", App.userId()))? then currentAccount.toUpperCase() else "")
 					Dom.div !->
-						Dom.style
-							margin: "0 0 -10 0"
 						Dom.text "Account holder"
 					name = Form.input
 						name: 'name'
 						type: 'text'
-					name.value (if (currentName = Db.shared.get("accountNames", Plugin.userId()))? then currentName else Plugin.userName())
+					name.value (if (currentName = Db.shared.get("accountNames", App.userId()))? then currentName else App.userName())
 				, (value) !->
 					if value and value is 'confirm'
 						accountV = account.value()
 						nameV = name.value()
 						Server.sync "account", accountV, nameV, !->
-							Db.shared.set "accounts", Plugin.userId(), accountV
-							Db.shared.set "accountNames", Plugin.userId(), nameV
+							Db.shared.set "accounts", App.userId(), accountV
+							Db.shared.set "accountNames", App.userId(), nameV
 						Toast.show "Account and name set"
 				, ['cancel', "Cancel", 'confirm', "Confirm"]
 		settleO.iterate (tx) !->
@@ -1082,8 +1069,8 @@ renderSettlePane = (settleO) !->
 				statusText = undefined
 				statusBold = false
 				confirmText = undefined
-				isTo = +to is Plugin.userId()
-				isFrom = +from is Plugin.userId()
+				isTo = +to is App.userId()
+				isFrom = +from is App.userId()
 				# Determine status text
 				if done
 					statusBold = isTo
@@ -1099,7 +1086,7 @@ renderSettlePane = (settleO) !->
 					if tx.get("done")
 						toggle()
 					else
-						Modal.confirm tr("Confirm payment?"), tr("Are you sure that you want to confirm? This will notify "+Plugin.userName(to))
+						Modal.confirm tr("Confirm payment?"), tr("Are you sure that you want to confirm? This will notify "+App.userName(to))
 							, !->
 								toggle()
 
@@ -1127,12 +1114,12 @@ renderSettlePane = (settleO) !->
 							, !->
 								doneConfirm()
 				if !isTo and !isFrom
-					if Plugin.userIsAdmin()
+					if App.userIsAdmin()
 						confirmText = tr("Tap to confirm this payment as admin")
 						confirmAdminDone()
 				else if !isTo and isFrom
 					if done # sender confirmed
-						if Plugin.userIsAdmin()
+						if App.userIsAdmin()
 							confirmText = tr("Waiting for confirmation by %1", formatName(to))
 							Dom.onTap !->
 								Modal.show tr("(Un)confirm payment?")
@@ -1178,18 +1165,18 @@ renderSettlePane = (settleO) !->
 							Dom.text confirmText
 
 		Dom.div !->
-			Dom.style textAlign: 'right'
+			Dom.style textAlign: 'center'
 			sentButNotReceived = false
 			for k,v of settleO.get()
 				if v.done
 					sentButNotReceived = true
-			if Plugin.userIsAdmin() # serverside this case will not be checked, ah well --Jelmer
-				Ui.button tr("Cancel"), !->
+			if App.userIsAdmin() # serverside this case will not be checked, ah well --Jelmer
+				Ui.lightButton tr("Cancel"), !->
 					if sentButNotReceived
 						Modal.show tr("Cancel not allowed"), tr("Please (un)confirm receipt of sent payments (dark gray checkmarks) before postponing the settle")
 					else
-						Modal.confirm tr("Cancel settle?"), !->
-							Dom.userText tr("You can start a new settle later")
+						Modal.confirm tr("Cancel settle?")
+						, tr("You can start a new settle later")
 						, !-> Server.sync 'settleStop', !-> Db.shared.remove 'settle'
 
 
@@ -1206,8 +1193,8 @@ formatMoney = (amount) ->
 	return currency+(string)
 
 formatName = (userId, capitalize) ->
-	if +userId != Plugin.userId()
-		Plugin.userName(userId)
+	if +userId != App.userId()
+		App.userName(userId)
 	else if capitalize
 		tr("You")
 	else
@@ -1217,7 +1204,7 @@ formatGroup = (userIds, capitalize) ->
 	if userIds.length > 3
 		userIds[0...3].map(formatName).join(', ') + ' and ' + (userIds.length-3) + ' others'
 	else if userIds.length > 1
-		userIds[0...userIds.length-1].map(formatName).join(', ') + ' and ' + Plugin.userName(userIds[userIds.length-1])
+		userIds[0...userIds.length-1].map(formatName).join(', ') + ' and ' + App.userName(userIds[userIds.length-1])
 	else if userIds.length is 1
 		formatName(userIds[0], capitalize)
 
@@ -1230,7 +1217,7 @@ selectUser = (cb) !->
 				backgroundColor: '#eee'
 				margin: '-12px'
 			Dom.overflow()
-			Plugin.users.iterate (user) !->
+			App.users.iterate (user) !->
 				Ui.item !->
 					Ui.avatar user.get('avatar')
 					Dom.text user.get('name')
@@ -1243,31 +1230,59 @@ selectUser = (cb) !->
 
 
 exports.renderSettings = !->
-	Dom.text "Select the currency symbol you want to use:"
-	Dom.br()
-	currencyInput = null
-	Dom.div !->
-		Dom.style display: 'inline-block', marginRight: "15px", width: "25px"
-		text = '€'
-		if Db.shared
-			if Db.shared.get("currency")
-				text = Db.shared.get("currency")
-		currencyInput = Form.input
-			name: 'currency'
-			text: text
-	renderCurrency = (value) !->
-		Ui.button !->
-			Dom.text value
-			Dom.style
-				width: "20px"
-				fontSize: "125%"
-				textAlign: "center"
-				padding: "4px 6px"
-		, !->
-			currencyInput.value(value)
-	renderCurrency("€")
-	renderCurrency("$")
-	renderCurrency("£")
+	singleMode = Obs.create (if Db.shared?.peek('singleMode') is false then false else true)
+
+	if !Db.shared
+		singleCheck = multipleCheck = undefined
+		# TODO: replace by radio buttons
+		Form.segmented
+			name: 'mode'
+			value: 'single'
+			segments: ['single', tr("Single transaction"), 'multiple', tr("Running balances")]
+			description: !->
+				showSingle = !Db.shared and singleMode.get()
+				Dom.text (if showSingle then tr("People will be asked to pay their share directly") else tr("Balances will be tracked, until a settle is started"))
+			onChange: (v) !->
+				singleMode.set(v is 'single')
+
+	Obs.observe !->
+		showSingle = !Db.shared and singleMode.get()
+
+		if showSingle
+			Form.input
+				name: '_title'
+				text: tr("Transaction description")
+				value: App.title()
+			Form.condition (values) ->
+				if !values._title.trim()
+					tr("A description is required")
+		else
+			Form.label tr("Currency symbol")
+			currencyInput = null
+			Dom.div !->
+				Dom.style Box: 'horizontal'
+				text = '€'
+				if Db.shared
+					if Db.shared.get("currency")
+						text = Db.shared.get("currency")
+				currencyInput = Form.input
+					name: 'currency'
+					text: text
+					style: padding: '0 4px', width: '35px'
+				renderCurrency = (value) !->
+					Ui.button !->
+						Dom.text value
+						Dom.style
+							width: "20px"
+							fontSize: "125%"
+							textAlign: "center"
+							padding: "4px 6px"
+							margin: "14px 4px 22px"
+					, !->
+						currencyInput.value(value)
+				renderCurrency("€")
+				renderCurrency("$")
+				renderCurrency("£")
 
 
 calculateShare = (transaction, id) ->
@@ -1337,16 +1352,14 @@ wholeAndCentToCents = (whole, cent) ->
 	(0|whole)*100 + (0|cent)
 
 calculateBalances = !->
-	Plugin.users.iterate (user) !->
-		balances.set user.key(), 0
 	Obs.observe !->
 		Db.shared.iterate "transactions", (transaction) !->
 			diff = Shared.transactionDiff(transaction.key())
 			for userId, amount of diff
-				balances.modify userId, (v) -> v + (diff[userId]||0)
+				balances.modify userId, (v) -> (v||0) + (diff[userId]||0)
 			Obs.onClean !->
 				for userId, amount of diff
-					balances.modify userId, (v) -> v - (diff[userId]||0)
+					balances.modify userId, (v) -> (v||0) - (diff[userId]||0)
 
 Dom.css
 	'.selected:not(.tap)':

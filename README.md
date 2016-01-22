@@ -14,9 +14,9 @@ On Linux/Mac, use your Bash-compatible shell. On Windows, we recommend the Git c
 
 1. Clone the example code: `git clone https://github.com/happening/Example.git`.
 
-2. Navigate to https://happening.im/dev. This will redirect you to the special "My group apps" happening, possibly after logging in.
+2. Create a Development Template by navigating to https://happening.im/store/106 and start the app.
 
-3. Tapping the console icon next to your Group App will show the Developer Console. Copy its __upload code__ to a file: `echo 123456ab > .deploykey`.
+3. Copy its __upload code__ to a file: `echo 123456ab > .deploykey`.
 
 4. Deploy your Group App using `./deploy`. It should instantaneously update in your browser / app.
 

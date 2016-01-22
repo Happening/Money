@@ -1,64 +1,12 @@
 Db = require 'db'
-Plugin = require 'plugin'
+App = require 'app'
 Event = require 'event'
 Timer = require 'timer'
-Social = require 'social'
+Comments = require 'comments'
 Shared = require 'shared'
 
 exports.onUpgrade = !->
 	log '[onUpgrade()] at '+new Date()
-	if (Db.shared.get("version")||0) < 2
-		log "Upgrading: settle float to int fix and balance changes (marked as U2)"
-		Db.shared.set "version", 2
-
-		isFloat = (number) ->
-			return number % 1 isnt 0
-		convert = (number) ->
-			Math.round((number||0)*100)
-		if Db.shared.isHash("settle")
-			# Fix float settles
-			hasFloats = false
-			Db.shared.iterate "settle", (settle) !->
-				hasFloats = hasFloats || isFloat((settle.get("amount")||0))
-			if hasFloats
-				Db.shared.iterate "settle", (settle) !->
-					log "U2: Settle amount upgraded to integer: oldAmount="+settle.get("amount")
-					settle.modify "amount", (v) -> convert(v)
-
-			# Handle confirmed transactions
-			Db.shared.iterate "settle", (settle) !->
-				done = settle.get("done")
-				if done is 2 or done is 3
-					[from,to] = settle.key().split(':')
-					id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
-					transaction = {}
-					forData = {}
-					forData[to] = settle.peek("amount")
-					byData = {}
-					byData[from] = settle.peek("amount")
-					transaction["creatorId"] = -1
-					transaction["for"] = forData
-					transaction["by"] = byData
-					transaction["type"] = "settle"
-					transaction["total"] = settle.peek("amount")
-					transaction["created"] = (new Date()/1000)
-					Db.shared.set 'transactions', id, transaction
-					log "U2: added transaction for settle: "+settle.key()+", amount="+settle.peek("amount")
-					Db.shared.remove "settle", settle.key()
-		# Transaction added by corrupt settle
-		Db.shared.iterate "transactions", (transaction) !->
-			if transaction.get("type") is "settle" and isFloat(transaction.get("total"))
-				# Is an incorrect transaction, do *100
-				oldTotal = transaction.get("total")
-				transaction.modify "total", (v) -> convert(v)
-				transaction.iterate "for", (line) !->
-					line.modify (v) -> convert(v)
-				transaction.iterate "by", (line) !->
-					line.modify (v) -> convert(v)
-				log "U2: multiplied settle transaction by 100, id="+transaction.key()+", oldTotal="+oldTotal
-
-		Db.shared.remove "balances"
-
 
 exports.onInstall = (config = {}) !->
 	onConfig(config)
@@ -71,7 +19,9 @@ exports.onConfig = onConfig = (config) !->
 		else if result.length > 1
 			result = result.substr(0, 1)
 		Db.shared.set "currency", result
-
+	if config.mode is 'single'
+		Db.shared.set 'singleMode', true
+		Db.shared.set 'setupFirst', true
 
 # Add or change a transaction
 ## id = transaction number
@@ -98,7 +48,7 @@ exports.client_transaction = (id, data) !->
 	data.total = +data.total
 
 	Db.shared.set 'transactions', id, data
-	Db.shared.set 'transactions', id, 'creatorId', Plugin.userId()
+	Db.shared.set 'transactions', id, 'creatorId', App.userId()
 	# Send notifications
 	members = []
 	Db.shared.iterate "transactions", id, "for", (user) !->
@@ -108,23 +58,22 @@ exports.client_transaction = (id, data) !->
 	if isNew
 		Event.create
 			unit: "transaction"
-			text: Plugin.userName()+" added transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
+			text: App.userName()+" added transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
 			include: members
-			sender: Plugin.userId()
+			sender: App.userId()
 	else
 		Event.create
 			unit: "transaction"
-			text: Plugin.userName()+" edited transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
+			text: App.userName()+" edited transaction: "+Db.shared.peek("transactions", id, "text")+" ("+formatMoney(Db.shared.peek("transactions", id, "total"))+")"
 			path: [id]
 			include: members
-			sender: Plugin.userId()
+			sender: App.userId()
 
 		# Add system comment
-		Social.customComment id,
-			c: "edited the transaction"
-			t: Math.round(new Date()/1000)
-			u: Plugin.userId()
-			system: true
+		Comments.post
+			legacyStore: id
+			u: App.userId()
+			s: "edited"
 
 	Timer.cancel 'settleRemind', {}
 	allZero = true
@@ -132,7 +81,12 @@ exports.client_transaction = (id, data) !->
 		if amount isnt 0
 			allZero = false
 	if not allZero
-		Timer.set 1000*60*60*24*7, 'settleRemind', {}  # Week: 1000*60*60*24*7
+		Timer.set 1000*60*60*24*7, 'settleRemind', {}  # Week
+
+	# Remove flag that indicates that the user should setup a transaction
+	if Db.shared.get('setupFirst')
+		settleStart()
+		Db.shared.set 'setupFirst', false
 
 
 # Delete a transaction
@@ -140,10 +94,10 @@ exports.client_removeTransaction = (id) !->
 	# Remove transaction
 	Db.shared.remove("transactions", id)
 
-
 # Start a settle for all balances
-exports.client_settleStart = !->
+exports.client_settleStart = settleStart = !->
 	# Generate required settle transactions
+	memberGuilt = {} # id, amount, [names of others]
 	negBalances = []
 	posBalances = []
 	for userId,amount of getBalances()
@@ -162,6 +116,10 @@ exports.client_settleStart = !->
 			if -neg == pos
 				identifier = negBalances[i][0] + ":" + posBalances[j][0]
 				settles[identifier] = {done: false, amount: pos}
+				m = 0|negBalances[i][0]
+				memberGuilt[m] = memberGuilt[m]||{amount: 0, others: []}
+				memberGuilt[m].amount+=pos
+				memberGuilt[m].others.push posBalances[j][0]
 				negBalances.splice(i, 1)
 				posBalances.splice(j, 1)
 				i--
@@ -173,6 +131,10 @@ exports.client_settleStart = !->
 		identifier = negBalances[0][0] + ":" + posBalances[0][0]
 		amount = Math.min(Math.abs(negBalances[0][1]), posBalances[0][1])
 		settles[identifier] = {done: false, amount: amount}
+		m = 0|negBalances[0][0]
+		memberGuilt[m] = memberGuilt[m]||{amount: 0, others: []}
+		memberGuilt[m].amount+=amount
+		memberGuilt[m].others.push posBalances[0][0]
 		negBalances[0][1] += amount
 		posBalances[0][1] -= amount
 		if negBalances[0][1] == 0
@@ -186,76 +148,105 @@ exports.client_settleStart = !->
 		log "WARNING: leftover positive balances: "+posBalances[0][1]
 	# Print and set the settles
 	log "Generated settles: "+JSON.stringify(settles)
+	log "Generated memberGuilt: "+JSON.stringify(memberGuilt)
 	Db.shared.set 'settle', settles
 	# Send notifications
-	members = []
-	Db.shared.iterate "settle", (settle) !->
-		[from,to] = settle.key().split(':')
-		members.push from
-		members.push to
-	Event.create
-		unit: "settle"
-		text: "A settle has started, check your payments"
-		include: members
+	for member, guilt of memberGuilt
+		Event.create
+			for: member
+			text: "A settle has started. You have to pay " + formatMoney(guilt.amount) + (if guilt.others.length is 1 then (" to " + App.userName(guilt.others[0])) else " in total")
+		Timer.set 1000*60*60*24*7, 'reminder', member  # Week
+
+	# Add system comment
+	Comments.post
+		u: App.userId()
+		s: "settleStart"
+
 	# Set reminders
 	Timer.cancel 'settleRemind', {}
-	Db.shared.iterate "settle", (settle) !->
-		Timer.set 1000*60*60*24*7, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
+	# Db.shared.iterate "settle", (settle) !->
+	# 	Timer.set 1000*60*60*24*7, 'reminder', {users: settle.key()}  # Week: 1000*60*60*24*7
+	Timer.set 1000*60*60*24*7, 'postReminder' # week
+
+exports.postReminder = !->
+	# Add system comment
+	Comments.post #
+		s: "settleRemind"
+	Timer.set 1000*60*60*24*7, 'postReminder'
 
 # Triggered when a settle reminder happens
 ## args.users = key to settle transaction
-exports.reminder = (args) ->
-	[from,to] = args.users.split(':')
+exports.reminder = (member) ->
+	others = 0
+	other = ""
+	Db.shared.iterate "settle", (settle) !->
+		[from,to] = settle.key().split(':')
+		if from is member
+			others++
+			other = to
+	return if others is 0
+	msg = ""
+	if others is 1
+		msg = "Reminder: there is an open settle to " + App.userName(other)
+	else
+		msg = "Reminder: you have " + others + " open settles!"
+	log "send reminder", member, ":", msg
 	Event.create
-		unit: "settlePayRemind"
-		text: "Reminder: there is an open settle to "+Plugin.userName(to)
-		include: from
-	Timer.set 1000*60*60*24*7, 'reminder', args
-
+		text: msg
+		for: [member]
+	Timer.set 1000*60*60*24*7, 'reminder', member # week
 
 # Reminder of non-zero balances
 exports.settleRemind = (args) ->
 	users = []
 	balances = getBalances()
-	for userId in Plugin.userIds()
+	for userId in App.userIds()
 		if balances[userId] isnt 0
 			users.push userId
-	Event.create
-		unit: "settleRemind"
-		text: "Reminder: there are balances to settle"
-		include: users
-	Timer.set 1000*60*60*24*7, 'settleRemind', args
+	if users.length > 0 and !Db.shared.isHash('settle')
+		Event.create
+			unit: "settleRemind"
+			text: "Reminder: there are balances to settle"
+			for: users
+		Timer.set 1000*60*60*24*7, 'settleRemind', args # week
 
 # Stop the current settle, or finish when complete
 exports.client_settleStop = !->
 	members = []
-	Db.shared.iterate (settle) !->
+	Db.shared.iterate 'settle', (settle) !->
 		[from,to] = settle.key().split(":")
 		members.push from
 		members.push to
+		Timer.cancel 'reminder', {users: settle.key()}
+		Timer.cancel 'postReminder'
+	# Add system comment
+	Comments.post
+		u: App.userId()
+		s: "settleCancel"
 	Event.create
 		unit: "settleFinish"
 		text: "Settling has been cancelled"
-		include: members
+		for: members
 	Db.shared.remove 'settle'
-
+	# Timer.set 1000*60*60*24*7, 'settleRemind', {}
+	Timer.cancel 'settleRemind', {}
 
 # Sender marks settle as paid
 exports.client_settlePayed = (key) !->
 	[from,to] = key.split(':')
-	return if Plugin.userId() != +from
+	return if App.userId() != +from
 	done = Db.shared.modify 'settle', key, 'done', (v) -> !v
 	if done
 		Event.create
 			unit: "settlePaid"
-			text: Plugin.userName(from)+" paid you "+formatMoney(Db.shared.peek("settle", key, "amount"))+" to settle, please confirm"
-			include: [to]
+			text: App.userName(from)+" paid you "+formatMoney(Db.shared.peek("settle", key, "amount"))+" to settle, please confirm"
+			for: [to]
 
 # Receiver marks settle as paid
 exports.client_settleDone = (key) !->
 	settle = Db.shared.ref 'settle', key
 	[from,to] = key.split(':')
-	return if (Plugin.userId() != +to and !Plugin.userIsAdmin())
+	return if (App.userId() != +to and !App.userIsAdmin())
 	id = Db.shared.modify 'transactionId', (v) -> (v||0)+1
 	transaction = {}
 	forData = {}
@@ -269,22 +260,34 @@ exports.client_settleDone = (key) !->
 	transaction["total"] = settle.peek("amount")
 	transaction["created"] = (new Date()/1000)
 	Db.shared.set 'transactions', id, transaction
-	if Plugin.userId() != +to
+	log "accepted settle:", from, to, App.userId()
+	if App.userId() != +to
 		Event.create
 			unit: "settleDone"
-			text: "Admin "+Plugin.userName(Plugin.userId())+" confirmed a "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
-			include: [from, to]
+			text: "Admin "+App.userName(App.userId())+" confirmed a "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+			for: [from, to]
 	else
 		Event.create
 			unit: "settleDone"
-			text: Plugin.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
-			include: [from]
+			text: App.userName(to)+" accepted your "+formatMoney(Db.shared.peek("settle", key, "amount"))+" settle payment"
+			for: [from]
 	Db.shared.remove "settle", key
+	# Cancel reminder for this settle
+	Timer.cancel 'reminder', {users: key}
+
+	#if this was the last settle
+	if Object.keys(Db.shared.get('settle')).length is 0
+		log "Settlement is done!"
+		# Add system comment
+		Comments.post
+			u: from
+			s: "settleDone"
+		Timer.cancel 'postReminder'
 
 # Set account of a user
 exports.client_account = (number, name) !->
-	Db.shared.set "accounts", Plugin.userId(), number
-	Db.shared.set "accountNames", Plugin.userId(), name
+	Db.shared.set "accounts", App.userId(), number
+	Db.shared.set "accountNames", App.userId(), name
 
 formatMoney = (amount) ->
 	amount = Math.round(amount)
@@ -296,14 +299,14 @@ formatMoney = (amount) ->
 		string +=".00"
 	else if amount%10 is 0
 		string += "0"
-	return currency+(string)
+	return currency+string
 
 capitalizeFirst = (string) ->
 	return string.charAt(0).toUpperCase() + string.slice(1)
 
 getBalances = ->
 	balances = {}
-	for userId in Plugin.userIds()
+	for userId in App.userIds()
 		balances[userId] = 0
 	Db.shared.iterate "transactions", (transaction) !->
 		diff = Shared.transactionDiff(transaction.key())
